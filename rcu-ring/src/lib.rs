@@ -1,4 +1,4 @@
-//! # Rcu-Tape
+//! # Rcu-Ring
 //!
 //! A sort-of implementation of a read-copy-update synchronization mechanism: <https://en.wikipedia.org/wiki/Read-copy-update>
 //!

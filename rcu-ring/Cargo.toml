@@ -1,11 +1,11 @@
 [package]
-name        = "cuprate-rcu-ring"
+name        = "rcu-ring"
 version     = "0.0.1"
-edition     = "2021"
+edition     = "2024"
 description = "A read-copy-update type that is backed by raw bytes"
 license     = "MIT"
 authors     = ["Boog900"]
-repository  = "https://github.com/Cuprate/cuprate/tree/main/storage/linear-tape/rcu-ring"
+repository  = "https://github.com/Cuprate/tapes/rcu-ring"
 keywords    = ["cuprate", "database", "rcu"]
 
 [target.'cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]

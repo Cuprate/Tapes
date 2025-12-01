@@ -1,14 +1,14 @@
 [package]
 name        = "tapes"
 version     = "0.0.1"
-edition     = "2021"
-description = "Cuprate's database abstraction"
+edition     = "2024"
+description = "A minimal database for storing data in contigious tapes"
 license     = "MIT"
 authors     = ["Boog900"]
-repository  = "https://github.com/Cuprate/cuprate/tree/main/storage/linear-tape"
-keywords    = ["cuprate", "database"]
+repository  = "https://github.com/Cuprate/tapes"
+keywords    = ["tape", "database"]
 
 [dependencies]
 memmap2 = { version = "0.9" }
-cuprate-rcu-ring = { path = "rcu-ring" }
+rcu-ring = { version = "0.0.1", path = "rcu-ring" }
 bytemuck = { version = "1" }

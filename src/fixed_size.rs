@@ -81,6 +81,11 @@ impl<P: Pod, M: BackingMemory> FixedSizedTapeAppender<'_, P, M> {
         })
     }
 
+    /// Returns if the tape is empty.
+    pub fn is_empty(&self) -> bool {
+        (self.current_used_bytes + *self.bytes_added) == 0
+    }
+
     /// Returns the length of the tape including data written in this transaction.
     pub fn len(&self) -> usize {
         (self.current_used_bytes + *self.bytes_added) / size_of::<P>()

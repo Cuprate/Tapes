@@ -12,14 +12,20 @@ use memmap2::MmapOptions;
 
 use crate::{Advice, Flush};
 
-/// An in-memory database. 
-/// 
+/// An in-memory database.
+///
 /// Resizes with an in-memory database will copy the whole tape to a new allocation, which should
 /// be kept in mind. If you expect resizes a memory map with a backing file is a better option: [`MmapFile`].
 pub type InMemory = Vec<UnsafeCell<u8>>;
 
 /// Backing memory that a tape can be built on top of.
-pub trait BackingMemory: Sized {
+///
+/// # Safety
+///
+/// For the methods of this trait that return ptrs the ptrs must fulfill all requirements for [`core::slice::from_raw_parts`]
+/// with the length being [`Self::capacity`]. This crate will handle making sure there are no concurrent mutable references
+/// and non-mutable references to a given range of bytes.
+pub unsafe trait BackingMemory: Sized {
     /// Options to set when creating/opening memory.
     type OpenOption: Clone + Debug;
 
@@ -28,7 +34,7 @@ pub trait BackingMemory: Sized {
 
     /// Returns a ptr to the start of the byte block.
     fn ptr(&self) -> *const u8;
-    
+
     /// Returns a mutable ptr to the start of the bytes.
     fn mut_ptr(&self) -> *mut u8;
 
@@ -61,7 +67,7 @@ pub struct MmapFileOpenOption {
     pub dir: PathBuf,
 }
 
-impl BackingMemory for MmapFile {
+unsafe impl BackingMemory for MmapFile {
     type OpenOption = MmapFileOpenOption;
 
     fn open(name: &str, min_len: u64, options: Self::OpenOption) -> io::Result<Self> {
@@ -149,7 +155,7 @@ impl BackingMemory for MmapFile {
     }
 }
 
-impl BackingMemory for Vec<UnsafeCell<u8>> {
+unsafe impl BackingMemory for Vec<UnsafeCell<u8>> {
     type OpenOption = ();
 
     fn open(_: &str, min_len: u64, _: Self::OpenOption) -> io::Result<Self> {

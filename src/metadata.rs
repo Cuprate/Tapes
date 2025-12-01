@@ -1,8 +1,8 @@
 use std::{io, ops::Deref, slice};
 
-use cuprate_rcu_ring::{required_len, DataHandle, RcuRing, WriteGuard};
+use rcu_ring::{DataHandle, RcuRing, WriteGuard, required_len};
 
-use crate::{memory::BackingMemory, Flush};
+use crate::{Flush, memory::BackingMemory};
 
 /// The u32 value which represents an append operation.
 pub(crate) const APPEND_OP: u32 = 0;
@@ -90,7 +90,8 @@ impl<M: BackingMemory> Metadata<M> {
 
         let memory = M::open("metadata.tapes", expected_len as u64, metadata_open_options)?;
 
-        let slice = slice::from_raw_parts_mut(memory.mut_ptr(), expected_len);
+        // Safety:
+        let slice = unsafe { slice::from_raw_parts_mut(memory.mut_ptr(), expected_len) };
         slice.fill(0);
 
         // Safety: we just checked the length of the file, and wrote zeros if there wasn't enough.

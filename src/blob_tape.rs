@@ -5,6 +5,7 @@ use std::ops::Deref;
 use std::{cmp::max, io, ops::Range};
 
 /// A trait for a type that can be turned into a blob of data.
+#[expect(clippy::len_without_is_empty)]
 pub trait Blob {
     /// The length of the bytes.
     fn len(&self) -> usize;

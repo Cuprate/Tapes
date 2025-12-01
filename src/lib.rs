@@ -26,7 +26,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     io, ptr,
-    sync::atomic::{fence, AtomicBool, AtomicPtr, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, Ordering, fence},
 };
 
 use bytemuck::Pod;
@@ -38,10 +38,10 @@ mod metadata;
 mod unsafe_tape;
 
 pub use blob_tape::{Blob, BlobTapeAppender, BlobTapePopper, BlobTapeSlice};
-pub use fixed_size::{FixedSizedTapeSlice, FixedSizedTapeAppender, FixedSizedTapePopper};
+pub use fixed_size::{FixedSizedTapeAppender, FixedSizedTapePopper, FixedSizedTapeSlice};
 pub use memory::{BackingMemory, InMemory, MmapFile};
 
-use metadata::{Metadata, APPEND_OP, POP_OP};
+use metadata::{APPEND_OP, Metadata, POP_OP};
 use unsafe_tape::UnsafeTape;
 
 /// The length of the RCU ring for the metadata.
@@ -97,7 +97,7 @@ pub struct Tape<M: BackingMemory> {
     /// The advice to open on the database with.
     pub advice: Advice,
     /// The initial size of the backing memory we can write into.
-    /// 
+    ///
     /// Will be ignored if we are opening a tape and the tape is larger.
     pub initial_memory_size: u64,
 }
