@@ -39,7 +39,7 @@ mod unsafe_tape;
 
 pub use blob_tape::{Blob, BlobTapeAppender, BlobTapePopper, BlobTapeSlice};
 pub use fixed_size::{FixedSizedTapeAppender, FixedSizedTapePopper, FixedSizedTapeSlice};
-pub use memory::{BackingMemory, InMemory, MmapFile};
+pub use memory::{BackingMemory, InMemory, MmapFile, MmapFileOpenOption};
 
 use metadata::{APPEND_OP, Metadata, POP_OP};
 use unsafe_tape::UnsafeTape;
