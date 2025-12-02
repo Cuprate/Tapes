@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    cmp::max,
+    cmp::{max, min},
     fmt::Debug,
     fs::{File, OpenOptions},
     io,
@@ -16,7 +16,7 @@ use crate::{Advice, Flush};
 ///
 /// Resizes with an in-memory database will copy the whole tape to a new allocation, which should
 /// be kept in mind. If you expect resizes a memory map with a backing file is a better option: [`MmapFile`].
-pub type InMemory = Vec<UnsafeCell<u8>>;
+pub type InMemory = Vec<UnsafeCell<Byte>>;
 
 /// Backing memory that a tape can be built on top of.
 ///
@@ -138,28 +138,38 @@ unsafe impl BackingMemory for MmapFile {
 
     fn flush<R: RangeBounds<usize>>(&self, range: R, mode: Flush) -> io::Result<()> {
         let start = match range.start_bound() {
-            Bound::Excluded(x) | Bound::Included(x) => max(*x, self.mmap_raw.len()),
+            Bound::Excluded(x) | Bound::Included(x) => min(*x, self.mmap_raw.len()),
             Bound::Unbounded => 0,
         };
 
         let len = match range.end_bound() {
-            Bound::Excluded(x) | Bound::Included(x) => max(*x, self.mmap_raw.len() - start),
+            Bound::Excluded(x) | Bound::Included(x) => {
+                min(x.saturating_sub(start), self.mmap_raw.len() - start)
+            }
             Bound::Unbounded => self.mmap_raw.len() - start,
         };
 
-        match mode {
-            Flush::Sync => self.mmap_raw.flush_range(start, len),
-            Flush::Async => self.mmap_raw.flush_async_range(start, len),
-            Flush::NoSync => Ok(()),
+        if len != 0 {
+            match mode {
+                Flush::Sync => self.mmap_raw.flush_range(start, len),
+                Flush::Async => self.mmap_raw.flush_async_range(start, len),
+                Flush::NoSync => Ok(()),
+            }
+        } else {
+            Ok(())
         }
     }
 }
 
-unsafe impl BackingMemory for Vec<UnsafeCell<u8>> {
+#[derive(Copy, Clone)]
+#[repr(C, align(16))]
+pub struct Byte(u8);
+
+unsafe impl BackingMemory for Vec<UnsafeCell<Byte>> {
     type OpenOption = ();
 
     fn open(_: &str, min_len: u64, _: Self::OpenOption) -> io::Result<Self> {
-        let vec = vec![0_u8; min_len as usize];
+        let vec = vec![Byte(0_u8); min_len as usize];
 
         let mut vec = std::mem::ManuallyDrop::new(vec);
         Ok(unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast(), vec.len(), vec.capacity()) })
@@ -187,7 +197,7 @@ unsafe impl BackingMemory for Vec<UnsafeCell<u8>> {
     }
 
     fn resize_copy(&self, new_len: u64) -> io::Result<Self> {
-        let mut vec = vec![0_u8; new_len as usize];
+        let mut vec = vec![Byte(0_u8); new_len as usize];
 
         let slice = unsafe { std::slice::from_raw_parts(self.as_ptr().cast(), self.len()) };
         vec[0..self.len()].copy_from_slice(slice);

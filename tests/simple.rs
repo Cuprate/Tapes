@@ -25,7 +25,7 @@ fn write_read() {
     test_tape.push_bytes([3_u8; 900].as_slice()).unwrap();
 
     drop(test_tape);
-    writer.flush(Flush::NoSync).unwrap();
+    writer.flush(Flush::Async).unwrap();
 
     let reader = tapes.reader().unwrap();
 
