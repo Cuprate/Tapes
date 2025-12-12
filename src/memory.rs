@@ -87,8 +87,8 @@ unsafe impl BackingMemory for MmapFile {
             file.set_len(min_len)?;
         }
 
-        if file.metadata()?.len() != min_len {
-            return Err(io::Error::other("Metadata file was incorrect size"));
+        if file.metadata()?.len() < min_len {
+            return Err(io::Error::other("File was incorrect size"));
         }
 
         let mmap_raw = MmapOptions::new().map_raw(&file)?;
