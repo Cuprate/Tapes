@@ -21,7 +21,7 @@ impl<M: BackingMemory> UnsafeTape<M> {
     ///
     /// This is marked unsafe as modifications to the underlying file can lead to UB.
     pub(crate) unsafe fn open(tape_info: Tape<M>) -> io::Result<Self> {
-        let memory = M::open(
+        let (memory, _) = M::open(
             &format!("{}.tape", tape_info.name),
             tape_info.initial_memory_size,
             tape_info.backing_memory_options.clone(),

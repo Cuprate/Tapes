@@ -29,8 +29,9 @@ pub unsafe trait BackingMemory: Sized {
     /// Options to set when creating/opening memory.
     type OpenOption: Clone + Debug;
 
-    /// Open [`Self`] with the given name, minimum length and options.
-    fn open(name: &str, min_len: u64, options: Self::OpenOption) -> io::Result<Self>;
+    /// Open [`Self`] with the given name, minimum length and options, returning a bool for if the
+    /// memory was newly created (`true`) or got from a previous instance (`false`).
+    fn open(name: &str, min_len: u64, options: Self::OpenOption) -> io::Result<(Self, bool)>;
 
     /// Returns a ptr to the start of the byte block.
     fn ptr(&self) -> *const u8;
@@ -70,7 +71,7 @@ pub struct MmapFileOpenOption {
 unsafe impl BackingMemory for MmapFile {
     type OpenOption = MmapFileOpenOption;
 
-    fn open(name: &str, min_len: u64, options: Self::OpenOption) -> io::Result<Self> {
+    fn open(name: &str, min_len: u64, options: Self::OpenOption) -> io::Result<(Self, bool)> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -80,13 +81,19 @@ unsafe impl BackingMemory for MmapFile {
 
         let len = file.metadata()?.len();
 
-        if len < min_len {
+        let mut new = false;
+        if len == 0 {
+            new = true;
             file.set_len(min_len)?;
+        }
+
+        if file.metadata()?.len() != min_len {
+            return Err(io::Error::other("Metadata file was incorrect size"));
         }
 
         let mmap_raw = MmapOptions::new().map_raw(&file)?;
 
-        Ok(Self { file, mmap_raw })
+        Ok((Self { file, mmap_raw }, new))
     }
 
     fn ptr(&self) -> *const u8 {
@@ -168,11 +175,14 @@ pub struct Byte(u8);
 unsafe impl BackingMemory for Vec<UnsafeCell<Byte>> {
     type OpenOption = ();
 
-    fn open(_: &str, min_len: u64, _: Self::OpenOption) -> io::Result<Self> {
+    fn open(_: &str, min_len: u64, _: Self::OpenOption) -> io::Result<(Self, bool)> {
         let vec = vec![Byte(0_u8); min_len as usize];
 
         let mut vec = std::mem::ManuallyDrop::new(vec);
-        Ok(unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast(), vec.len(), vec.capacity()) })
+        Ok((
+            unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast(), vec.len(), vec.capacity()) },
+            true,
+        ))
     }
 
     fn ptr(&self) -> *const u8 {

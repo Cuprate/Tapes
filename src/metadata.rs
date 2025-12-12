@@ -83,20 +83,22 @@ impl<M: BackingMemory> Metadata<M> {
     /// Opens the metadata file for the tapes.
     pub(crate) unsafe fn open(
         metadata_open_options: M::OpenOption,
-        tables: usize,
+        tapes: usize,
         metadata_ring_len: usize,
     ) -> io::Result<Self> {
-        let expected_len = required_len(tables * 8, metadata_ring_len);
+        let expected_len = required_len(tapes * 8, metadata_ring_len);
 
-        let memory = M::open("metadata.tapes", expected_len as u64, metadata_open_options)?;
+        let (memory, new) = M::open("metadata.tapes", expected_len as u64, metadata_open_options)?;
 
-        // Safety:
-        let slice = unsafe { slice::from_raw_parts_mut(memory.mut_ptr(), expected_len) };
-        slice.fill(0);
+        if new {
+            // Safety: we just created this memory so we know there are no other references.
+            let slice = unsafe { slice::from_raw_parts_mut(memory.mut_ptr(), expected_len) };
+            slice.fill(0);
+        }
 
         // Safety: we just checked the length of the file, and wrote zeros if there wasn't enough.
         unsafe {
-            let rcu_ring = RcuRing::new_from_ptr(memory.mut_ptr(), tables * 8, metadata_ring_len);
+            let rcu_ring = RcuRing::new_from_ptr(memory.mut_ptr(), tapes * 8, metadata_ring_len);
 
             Ok(Self { memory, rcu_ring })
         }
