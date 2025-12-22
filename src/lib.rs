@@ -36,6 +36,8 @@ mod fixed_size;
 mod memory;
 mod metadata;
 mod unsafe_tape;
+mod top_cache;
+mod ring_buffer;
 
 pub use blob_tape::{Blob, BlobTapeAppender, BlobTapePopper, BlobTapeSlice};
 pub use fixed_size::{FixedSizedTapeAppender, FixedSizedTapePopper, FixedSizedTapeSlice};
