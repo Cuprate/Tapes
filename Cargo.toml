@@ -1,14 +1,15 @@
 [package]
-name        = "tapes"
-version     = "0.0.1"
-edition     = "2024"
-description = "A minimal database for storing data in contigious tapes"
-license     = "MIT"
-authors     = ["Boog900"]
-repository  = "https://github.com/Cuprate/tapes"
-keywords    = ["tape", "database"]
+name = "tapes"
+version = "0.1.0"
+edition = "2024"
 
 [dependencies]
-memmap2 = { version = "0.9" }
-rcu-ring = { version = "0.0.1", path = "rcu-ring" }
+slab = { version = "0.4" }
+blake2 = { version = "0.10" }
+borsh = { version = "1", features = ["derive"] }
+parking_lot = { version = "0.12" }
 bytemuck = { version = "1" }
+libc = "0.2.179"
+
+[dev-dependencies]
+tempfile = "3"
