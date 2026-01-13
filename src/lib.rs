@@ -4,7 +4,7 @@ mod ring_buffer;
 mod tapes;
 
 pub use tapes::{
-    BlobTape, FixedSizedTape, TapeOpenOptions, Tapes, TapesAppenderTransaction,
+    BlobTape, FixedSizedTape, TapeOpenOptions, Tapes, TapesAppendTransaction,
     TapesReadTransaction,
 };
 

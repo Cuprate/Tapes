@@ -10,6 +10,7 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
+use crate::Persistence;
 
 pub type ActiveMetadata = HashMap<Box<str>, u64>;
 
@@ -33,6 +34,7 @@ impl<'a> Drop for MetadataGuard<'a> {
 
         metadata_inner.reader_epochs.remove(self.reader_slot);
 
+        // If there is a writer waiting and all readers have caught up to the current epoch we can notify the writer.
         if metadata_inner.writer_waiting
             && metadata_inner
                 .reader_epochs
@@ -58,6 +60,8 @@ pub struct MetadataInner {
 
     writer_waiting: bool,
     reader_epochs: Slab<u64>,
+
+    prev_op_was_pop: bool,
 }
 
 impl Metadata {
@@ -72,6 +76,7 @@ impl Metadata {
                 active_metadata: Arc::new(active_metadata),
                 writer_waiting: false,
                 reader_epochs: Default::default(),
+                prev_op_was_pop: false
             }),
             writer_cv: Condvar::new(),
         })
@@ -90,11 +95,12 @@ impl Metadata {
         }
     }
 
-    pub fn update_metadata(&self, new_metadata: ActiveMetadata, wait_for_old_readers: bool) {
+    pub fn update_metadata(&self, new_metadata: ActiveMetadata, is_pop: bool, persistence: Persistence) {
         let mut inner = self.inner.lock();
 
-        if wait_for_old_readers
-            && inner
+        // If the last op was a pop and this op is an append we need to wait for all readers to catch up
+        // to the current epoch so they see the pop and we don't overwrite data they are reading.
+        if !is_pop && inner.prev_op_was_pop && inner
                 .reader_epochs
                 .iter()
                 .any(|(_, epoch)| epoch < &inner.current_epoch)
@@ -115,9 +121,9 @@ impl Metadata {
 
         inner.active_metadata = Arc::new(new_metadata);
         inner.current_epoch += 1;
+        inner.prev_op_was_pop = is_pop;
 
-        // TODO: configure this
-        inner.files.flush().unwrap();
+        inner.files.flush(persistence).unwrap();
     }
 }
 
@@ -168,7 +174,7 @@ impl MetadataBackingFiles {
         self.data_to_flush = serialise_metadata(epoch, new_metadata);
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&mut self, persistence: Persistence) -> io::Result<()> {
         if self.data_to_flush.is_empty() {
             panic!("Tried to flush empty metadata");
         }
@@ -182,7 +188,11 @@ impl MetadataBackingFiles {
         file.rewind()?;
         file.write_all(&self.data_to_flush)?;
 
-        file.sync_data()?;
+        match persistence {
+            Persistence::Buffer => (),
+            Persistence::SyncData => file.sync_data()?,
+            Persistence::SyncAll => file.sync_all()?,
+        }
 
         self.data_to_flush.clear();
         self.next_is_left = !self.next_is_left;
@@ -244,49 +254,8 @@ pub fn try_read_metadata<R: Read>(r: &mut R) -> io::Result<StoredMetadata> {
     let hash: [u8; 32] = hasher.finalize().into();
 
     if hash != metadata.hash {
-        todo!()
+        return Err(io::Error::new(io::ErrorKind::Other, "Metadata hash mismatch"));
     }
 
     Ok(metadata)
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::metadata::{ActiveMetadata, Metadata};
-    use std::collections::HashMap;
-
-    #[test]
-    fn basic_test() {
-        let folder = tempfile::tempdir().unwrap();
-
-        let meta = Metadata::open(folder.path()).unwrap();
-
-        println!("{:?}", meta.metadata().active_metadata);
-
-        let reader = meta.metadata();
-
-        meta.update_metadata(HashMap::from_iter([("test".into(), 10)]), true);
-
-        println!("{:?}", meta.metadata().active_metadata);
-
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                meta.update_metadata(HashMap::from_iter([("test".into(), 22)]), true);
-
-                println!("{:?}", meta.metadata().active_metadata);
-            });
-
-            s.spawn(|| {
-                println!("{:?}", reader.active_metadata);
-                std::thread::sleep(std::time::Duration::from_millis(1200));
-                drop(reader);
-            });
-        });
-
-        drop(meta);
-
-        let meta = Metadata::open(folder.path()).unwrap();
-
-        println!("{:?}", meta.metadata().active_metadata);
-    }
 }

@@ -1,3 +1,7 @@
+# Work in progress
+
+Not everything is complete yet.
+
 # Tapes Database
 
 A specialised database for storing data in contiguous tapes.
@@ -5,8 +9,6 @@ A specialised database for storing data in contiguous tapes.
 Each environment supports multiple independent tapes, with ACID updates across them. There are 2 types of tapes: fixed-sized and
 blob. Fixed-sized tapes store fixed sized values, which allows arbitrary lookup of values by their index, blob tapes however is
 just a contiguous slice of bytes so to access data you must keep its index.
-
-Each tape is memory mapped and supports zero-copy access.
 
 ## Supported Operations
 
