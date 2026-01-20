@@ -10,6 +10,7 @@ use parking_lot::RwLock;
 use crate::Persistence;
 
 /// A simple ring buffer to cache the top of a tape.
+#[derive(Debug)]
 pub struct RingBuffer {
     buf: Box<[u8]>,
     /// The length of the ring buffer, will not be more than `buf.len()`.
@@ -71,7 +72,7 @@ impl RingBuffer {
 
     /// Returns a tuple of slices which represent the [`RingBuffer`], returned in the order the data
     /// is in the tape.
-    fn as_slices(&self) -> (&[u8], &[u8]) {
+    pub fn as_slices(&self) -> (&[u8], &[u8]) {
         let end_idx = min(self.start_idx + self.len, self.buf.len());
         let first_slice = &self.buf[self.start_idx..end_idx];
         let remaining = self.len - first_slice.len();
@@ -84,7 +85,7 @@ impl RingBuffer {
     /// # Panics
     ///
     /// This will panic if the data cannot fit into the [`RingBuffer`].
-    pub fn push(&mut self, data: &[u8]) {
+    pub fn push(&mut self, data: &[u8], missed_bytes: usize) {
         let data_len = data.len();
         assert!(data_len <= self.buf.len(), "Data too large for buffer");
 
@@ -107,6 +108,8 @@ impl RingBuffer {
             self.start_idx = (self.start_idx + (overflow)) % self.buf.len();
             self.cache_start_idx += overflow;
         }
+
+        self.cache_start_idx += missed_bytes;
         self.len = min(new_len, self.buf.len());
     }
 
@@ -163,7 +166,7 @@ impl RingBufferFileWriter {
 
             write_all_at(&self.file, data, self.len)?;
 
-            ring_buffer.push(&data[data.len() - capacity..])
+            ring_buffer.push(&data[data.len() - capacity..], data.len() - capacity)
         }
         // Writing enough data to push data that hasn't been flushed to disk yet out of the ring buffer.
         else if self.bytes_to_flush + data.len() > capacity {
@@ -178,12 +181,12 @@ impl RingBufferFileWriter {
             self.bytes_to_flush = 0;
 
             self.bytes_to_flush += data.len();
-            ring_buffer.push(&data)
+            ring_buffer.push(&data, 0)
         }
         // Writing data that won't push data that hasn't been flushed to disk yet out of the ring buffer.
         else {
             self.bytes_to_flush += data.len();
-            ring_buffer.push(&data)
+            ring_buffer.push(&data, 0)
         }
 
         let old_len = self.len;

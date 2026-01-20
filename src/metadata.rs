@@ -1,16 +1,15 @@
+use crate::Persistence;
 use blake2::Digest;
 use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::{Condvar, Mutex};
 use slab::Slab;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::hash::Hash;
 use std::io;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
-use crate::Persistence;
 
 pub type ActiveMetadata = HashMap<Box<str>, u64>;
 
@@ -76,7 +75,7 @@ impl Metadata {
                 active_metadata: Arc::new(active_metadata),
                 writer_waiting: false,
                 reader_epochs: Default::default(),
-                prev_op_was_pop: false
+                prev_op_was_pop: false,
             }),
             writer_cv: Condvar::new(),
         })
@@ -95,12 +94,19 @@ impl Metadata {
         }
     }
 
-    pub fn update_metadata(&self, new_metadata: ActiveMetadata, is_pop: bool, persistence: Persistence) {
+    pub fn update_metadata(
+        &self,
+        new_metadata: ActiveMetadata,
+        is_pop: bool,
+        persistence: Persistence,
+    ) {
         let mut inner = self.inner.lock();
 
         // If the last op was a pop and this op is an append we need to wait for all readers to catch up
         // to the current epoch so they see the pop and we don't overwrite data they are reading.
-        if !is_pop && inner.prev_op_was_pop && inner
+        if !is_pop
+            && inner.prev_op_was_pop
+            && inner
                 .reader_epochs
                 .iter()
                 .any(|(_, epoch)| epoch < &inner.current_epoch)
@@ -254,7 +260,10 @@ pub fn try_read_metadata<R: Read>(r: &mut R) -> io::Result<StoredMetadata> {
     let hash: [u8; 32] = hasher.finalize().into();
 
     if hash != metadata.hash {
-        return Err(io::Error::new(io::ErrorKind::Other, "Metadata hash mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Metadata hash mismatch",
+        ));
     }
 
     Ok(metadata)

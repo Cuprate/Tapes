@@ -42,7 +42,7 @@ pub struct FixedSizedTape<E> {
 pub struct BlobTape {
     name: &'static str,
     file: Arc<File>,
-    top_cache: Arc<RwLock<RingBuffer>>,
+    pub top_cache: Arc<RwLock<RingBuffer>>,
 }
 
 /// A tapes database.
@@ -116,7 +116,8 @@ impl<'a> TapesAppendTransaction<'a> {
         fixed_sized_tape: &FixedSizedTape<E>,
         entries: &[E],
     ) -> io::Result<u64> {
-        self.append_bytes(&fixed_sized_tape.inner, bytemuck::cast_slice(entries)).map(|len| len / size_of::<E>() as u64)
+        self.append_bytes(&fixed_sized_tape.inner, bytemuck::cast_slice(entries))
+            .map(|len| len / size_of::<E>() as u64)
     }
 
     /// Append some bytes to the end of the tape.
@@ -183,15 +184,6 @@ impl<'a> TapesAppendTransaction<'a> {
             Ok(file) => {
                 let len = *self.metadata_guard.get(name).unwrap_or(&0);
 
-                unsafe {
-                    libc::posix_fadvise(
-                        file.as_raw_fd(),
-                        0,
-                        0,
-                        libc::POSIX_FADV_NOREUSE,
-                    )
-                };
-
                 if file.metadata()?.len() < len {
                     return Err(io::Error::other("Tape file is too small"));
                 }
@@ -240,15 +232,6 @@ impl<'a> TapesAppendTransaction<'a> {
                         .open(options.dir.join(name))?,
                 );
 
-                unsafe {
-                    libc::posix_fadvise(
-                        file.as_raw_fd(),
-                        0,
-                        0,
-                        libc::POSIX_FADV_NOREUSE,
-                    )
-                };
-
                 let top_cache = Arc::new(RwLock::new(RingBuffer::new(
                     options.top_cache_size as usize,
                     0,
@@ -285,7 +268,10 @@ impl<'a> TapesAppendTransaction<'a> {
         let mut entry = E::zeroed();
         let res = self.read_entries(fixed_sized_tape, index, core::slice::from_mut(&mut entry));
 
-        if res.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::UnexpectedEof) {
+        if res
+            .as_ref()
+            .is_err_and(|e| e.kind() == io::ErrorKind::UnexpectedEof)
+        {
             return Ok(None);
         }
 
@@ -342,7 +328,8 @@ impl<'a> TapesAppendTransaction<'a> {
             new_metadata.insert(name.into(), tape.len);
         }
 
-        self.metadata.update_metadata(new_metadata, false, persistence);
+        self.metadata
+            .update_metadata(new_metadata, false, persistence);
 
         Ok(())
     }
@@ -356,28 +343,46 @@ pub struct TapesTruncateTransaction<'a> {
 
 impl<'a> TapesTruncateTransaction<'a> {
     pub fn drop_from_fixed_sized_tape<E>(&mut self, tape: &FixedSizedTape<E>, numb: u64) {
-        let old_len = *self.metadata_guard.get(tape.inner.name).unwrap();
+        let old_len = *self
+            .modified_tapes
+            .get(tape.inner.name)
+            .or_else(|| self.metadata_guard.get(tape.inner.name))
+            .unwrap();
         assert!(old_len >= numb * size_of::<E>() as u64);
 
-        self.modified_tapes.insert(tape.inner.name.into(), old_len - numb * size_of::<E>() as u64);
+        let mut top_cache = tape.inner.top_cache.write();
+        top_cache.pop(numb as usize * size_of::<E>());
+
+        self.modified_tapes.insert(
+            tape.inner.name.into(),
+            old_len - numb * size_of::<E>() as u64,
+        );
     }
 
     pub fn set_blob_tape_len(&mut self, tape: &BlobTape, new_len: u64) {
-         let old_len = *self.metadata_guard.get(tape.name).unwrap();
+        let old_len = *self
+            .modified_tapes
+            .get(tape.name)
+            .or_else(|| self.metadata_guard.get(tape.name))
+            .unwrap();
         assert!(old_len >= new_len);
+
+        let mut top_cache = tape.top_cache.write();
+        top_cache.pop((old_len - new_len) as usize);
 
         self.modified_tapes.insert(tape.name.into(), new_len);
     }
 
     pub fn commit(&mut self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
-        
+
         for (&modified_tape, new_len) in &self.modified_tapes {
             new_metadata.insert(modified_tape.into(), *new_len);
         }
-        
-        self.metadata.update_metadata(new_metadata, true, persistence);
-        
+
+        self.metadata
+            .update_metadata(new_metadata, true, persistence);
+
         Ok(())
     }
 }
@@ -417,7 +422,10 @@ impl<'a> TapesReadTransaction<'a> {
         let mut entry = E::zeroed();
         let res = self.read_entries(fixed_sized_tape, index, core::slice::from_mut(&mut entry));
 
-        if res.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::UnexpectedEof) {
+        if res
+            .as_ref()
+            .is_err_and(|e| e.kind() == io::ErrorKind::UnexpectedEof)
+        {
             return Ok(None);
         }
 
@@ -462,22 +470,29 @@ impl<'a> TapesReadTransaction<'a> {
         read_bytes(blob_tape, tape_len, offset, buf)
     }
 
-    pub fn iter_from<'b, E: bytemuck::Pod>(&'b self, fixed_sized_tape: &'b FixedSizedTape<E>, from: u64) -> io::Result<fixed_sized_iter::Iter<'b, E>> {
+    pub fn iter_from<'b, E: bytemuck::Pod>(
+        &'b self,
+        fixed_sized_tape: &'b FixedSizedTape<E>,
+        from: u64,
+    ) -> io::Result<fixed_sized_iter::Iter<'b, E>> {
         let tape_len = *self
             .metadata_guard
             .get(fixed_sized_tape.inner.name)
-            .ok_or(io::Error::other("Tape not found"))? / size_of::<E>() as u64;
+            .ok_or(io::Error::other("Tape not found"))?
+            / size_of::<E>() as u64;
+
+        if from > tape_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Read past end of tape",
+            ));
+        }
 
         fixed_sized_iter::Iter::new(fixed_sized_tape, &self, from, tape_len)
     }
 }
 
-fn read_bytes(
-    blob_tape: &BlobTape,
-    tape_len: u64,
-    offset: u64,
-    buf: &mut [u8],
-) -> io::Result<()> {
+fn read_bytes(blob_tape: &BlobTape, tape_len: u64, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     if tape_len < offset + buf.len() as u64 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
