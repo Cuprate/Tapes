@@ -1,7 +1,3 @@
-mod fixed_sized_iter;
-
-use parking_lot::RwLock;
-use std::os::unix::fs::FileExt;
 use std::{
     cmp::min,
     collections::HashMap,
@@ -13,12 +9,16 @@ use std::{
     sync::Arc,
 };
 
-use crate::traits::{TapesAppend, TapesRead, TapesTruncate};
+use parking_lot::RwLock;
+
 use crate::{
     Persistence,
     metadata::{Metadata, MetadataGuard},
     ring_buffer::{RingBuffer, RingBufferFileWriter},
+    traits::{TapesAppend, TapesRead, TapesTruncate, read_exact_at},
 };
+
+mod fixed_sized_iter;
 
 /// Configuration options for opening a tape.
 pub struct TapeOpenOptions {
@@ -140,7 +140,7 @@ impl<'a> TapesAppendTransaction<'a> {
                     len.saturating_sub(options.top_cache_size) as usize,
                 );
 
-                file.read_exact_at(buf, len - buf.len() as u64)?;
+                read_exact_at(&file, buf, len - buf.len() as u64)?;
 
                 let top_cache = Arc::new(RwLock::new(ring_buffer));
                 let file = Arc::new(file);

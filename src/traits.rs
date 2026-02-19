@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io;
 
 use crate::{BlobTape, FixedSizedTape};
@@ -135,47 +136,52 @@ fn read_bytes(blob_tape: &BlobTape, tape_len: u64, offset: u64, buf: &mut [u8]) 
     }
 
     if last_byte_needed_offset != offset {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-
-            blob_tape.file.read_exact_at(
-                &mut buf[0..(last_byte_needed_offset - offset) as usize],
-                offset,
-            )?;
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-
-            let mut buf = buf;
-            let mut offset = offset;
-            while !buf.is_empty() {
-                match self.file.seek_read(buf, offset) {
-                    Ok(0) => {
-                        break;
-                    }
-                    Ok(n) => {
-                        buf = &mut buf[n..];
-                        offset += n as u64;
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-
-            if !buf.is_empty() {
-                Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "failed to fill the whole buffer",
-                ))
-            } else {
-                Ok(())
-            }
-        }
+        read_exact_at(
+            &blob_tape.file,
+            &mut buf[0..(last_byte_needed_offset - offset) as usize],
+            offset,
+        )?;
     }
 
     Ok(())
+}
+
+pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+
+        file.read_exact_at(buf, offset)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+
+        let mut buf = buf;
+        let mut offset = offset;
+        while !buf.is_empty() {
+            match file.seek_read(buf, offset) {
+                Ok(0) => {
+                    break;
+                }
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        if !buf.is_empty() {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to fill the whole buffer",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }

@@ -196,7 +196,7 @@ impl RingBufferFileWriter {
     }
 }
 
-fn write_all_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
@@ -206,10 +206,13 @@ fn write_all_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileExt;
+
         let n = file.seek_write(buf, offset)?;
         if n != buf.len() {
-            return Err(io::Error::READ_EXACT_EOF);
+            return Err(io::Error::other("Failed to write all bytes to tape"));
         }
+
+        Ok(())
     }
 }
 
