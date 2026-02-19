@@ -1,0 +1,71 @@
+name: ci.yml
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all --check
+
+  typo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Spell Check
+        uses: crate-ci/typos@master
+
+  ci:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [
+          windows-2022, # EOL = 2026-10-13 | <https://endoflife.date/windows-server>
+          macos-15,     # EOL = 2027-09-16 | <https://endoflife.date/macos>
+          ubuntu-22.04, # EOL = 2027-04-01 | <https://endoflife.date/ubuntu>
+          ubuntu-22.04-arm,
+        ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ matrix.os }}
+
+      - name: Documentation
+        run: cargo doc --all-features --no-deps
+
+      - name: Clippy (fail on warnings)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      - name: Build
+        run: cargo build --all-features --all-targets

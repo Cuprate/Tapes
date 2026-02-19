@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::{FixedSizedTape, TapesReadTransaction};
+use crate::{FixedSizedTape, TapesRead, TapesReadTransaction};
 
 pub struct Iter<'a, E> {
     tape: &'a FixedSizedTape<E>,

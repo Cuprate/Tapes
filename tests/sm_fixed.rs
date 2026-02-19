@@ -3,7 +3,9 @@ use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use std::fmt::{Debug, Formatter};
 
-use tapes::{FixedSizedTape, Persistence, TapeOpenOptions, Tapes};
+use tapes::{
+    FixedSizedTape, Persistence, TapeOpenOptions, Tapes, TapesAppend, TapesRead, TapesTruncate,
+};
 
 #[derive(Clone, Debug)]
 enum TapeTransition {
@@ -123,7 +125,14 @@ impl StateMachineTest for TapesState {
             TapeTransition::Pop(amt) => {
                 let mut truncate = state.tapes.truncate();
 
-                truncate.drop_from_fixed_sized_tape(&state.tape, amt);
+                let low = amt / 2;
+                let high = amt - low;
+
+                truncate.drop_fixed_sized_tape(&state.tape, low);
+
+                for _ in 0..high {
+                    truncate.pop_fixed_sized_tape(&state.tape).unwrap();
+                }
 
                 truncate.commit(Persistence::Buffer).unwrap();
             }
@@ -178,9 +187,8 @@ impl StateMachineTest for TapesState {
             assert_eq!(entry.unwrap(), ref_state.buf[i]);
             last_i = i;
         }
-        
+
         assert_eq!(last_i.wrapping_add(1), ref_state.buf.len());
-        
 
         drop(reader);
 

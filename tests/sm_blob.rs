@@ -3,7 +3,7 @@ use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use std::fmt::{Debug, Formatter};
 
-use tapes::{BlobTape, Persistence, TapeOpenOptions, Tapes};
+use tapes::{BlobTape, Persistence, TapeOpenOptions, Tapes, TapesAppend, TapesRead, TapesTruncate};
 
 #[derive(Clone, Debug)]
 enum TapeTransition {
@@ -123,7 +123,7 @@ impl StateMachineTest for TapesState {
             TapeTransition::Truncate(new_len) => {
                 let mut truncate = state.tapes.truncate();
 
-                truncate.set_blob_tape_len(&state.tape, new_len);
+                truncate.truncate_blob_tape(&state.tape, new_len);
 
                 truncate.commit(Persistence::Buffer).unwrap();
             }

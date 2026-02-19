@@ -1,15 +1,18 @@
-use crate::Persistence;
+use std::{
+    collections::HashMap,
+    fs::{File, OpenOptions},
+    io::{self, Read, Seek, Write},
+    ops::Deref,
+    path::Path,
+    sync::Arc,
+};
+
 use blake2::Digest;
 use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::{Condvar, Mutex};
 use slab::Slab;
-use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::io::{BufWriter, Read, Seek, Write};
-use std::ops::Deref;
-use std::path::Path;
-use std::sync::Arc;
+
+use crate::Persistence;
 
 pub type ActiveMetadata = HashMap<Box<str>, u64>;
 
@@ -247,7 +250,7 @@ fn serialise_metadata(epoch: u64, metadata: &ActiveMetadata) -> Vec<u8> {
     .unwrap()
 }
 
-pub fn try_read_metadata<R: Read>(r: &mut R) -> io::Result<StoredMetadata> {
+fn try_read_metadata<R: Read>(r: &mut R) -> io::Result<StoredMetadata> {
     let metadata = StoredMetadata::deserialize_reader(r)?;
 
     let mut hasher = blake2::Blake2b::new();
