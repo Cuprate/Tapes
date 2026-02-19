@@ -181,12 +181,12 @@ impl RingBufferFileWriter {
             self.bytes_to_flush = 0;
 
             self.bytes_to_flush += data.len();
-            ring_buffer.push(&data, 0)
+            ring_buffer.push(data, 0)
         }
         // Writing data that won't push data that hasn't been flushed to disk yet out of the ring buffer.
         else {
             self.bytes_to_flush += data.len();
-            ring_buffer.push(&data, 0)
+            ring_buffer.push(data, 0)
         }
 
         let old_len = self.len;
@@ -228,7 +228,7 @@ fn flush(
     match bytes_to_flush.cmp(&second_slice.len()) {
         Ordering::Less | Ordering::Equal => {
             write_all_at(
-                &file,
+                file,
                 &second_slice[second_slice.len() - bytes_to_flush..],
                 tape_len - bytes_to_flush as u64,
             )?;
@@ -236,13 +236,13 @@ fn flush(
         Ordering::Greater => {
             let first_slice_top_needed = bytes_to_flush - second_slice.len();
             write_all_at(
-                &file,
+                file,
                 &fist_slice[fist_slice.len() - first_slice_top_needed..],
                 tape_len - bytes_to_flush as u64,
             )?;
             bytes_to_flush -= first_slice_top_needed;
 
-            write_all_at(&file, &second_slice, tape_len - bytes_to_flush as u64)?;
+            write_all_at(file, second_slice, tape_len - bytes_to_flush as u64)?;
         }
     }
 

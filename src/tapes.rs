@@ -103,7 +103,7 @@ impl<'a> TapesAppendTransaction<'a> {
         if self
             .metadata_guard
             .get(name)
-            .is_some_and(|len| *len as usize % size_of::<E>() != 0)
+            .is_some_and(|len| !(*len as usize).is_multiple_of(size_of::<E>()))
         {
             return Err(io::Error::other(
                 "Tape size is not a multiple of entry size",
@@ -175,6 +175,7 @@ impl<'a> TapesAppendTransaction<'a> {
                         .write(true)
                         .read(true)
                         .create(true)
+                        .truncate(true)
                         .open(options.dir.join(name))?,
                 );
 
@@ -294,7 +295,7 @@ impl TapesTruncate for TapesTruncateTransaction<'_> {
         let mut top_cache = tape.top_cache.write();
         top_cache.pop((old_len - new_len) as usize);
 
-        self.modified_tapes.insert(tape.name.into(), new_len);
+        self.modified_tapes.insert(tape.name, new_len);
     }
 }
 
@@ -325,7 +326,7 @@ impl<'a> TapesReadTransaction<'a> {
             ));
         }
 
-        fixed_sized_iter::Iter::new(fixed_sized_tape, &self, from, tape_len)
+        fixed_sized_iter::Iter::new(fixed_sized_tape, self, from, tape_len)
     }
 }
 

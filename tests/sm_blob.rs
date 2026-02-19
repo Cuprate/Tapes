@@ -59,7 +59,7 @@ impl ReferenceStateMachine for StateMachine {
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
         match transition {
             TapeTransition::Append(data) => {
-                state.buf.extend_from_slice(&data);
+                state.buf.extend_from_slice(data);
             }
             TapeTransition::Truncate(new_len) => state.buf.truncate(*new_len as usize),
             TapeTransition::ReOpen => (),
@@ -90,7 +90,7 @@ impl StateMachineTest for TapesState {
 
         let tape = append
             .open_blob_tape(
-                &"tape",
+                "tape",
                 &TapeOpenOptions {
                     top_cache_size: ref_state.cache_size,
                     dir: dir.path().to_path_buf(),
@@ -128,12 +128,12 @@ impl StateMachineTest for TapesState {
                 truncate.commit(Persistence::Buffer).unwrap();
             }
             TapeTransition::ReOpen => {
-                let tapes = Tapes::open(&state.dir.path()).unwrap();
+                let tapes = Tapes::open(state.dir.path()).unwrap();
                 let mut append = tapes.append();
 
                 let tape = append
                     .open_blob_tape(
-                        &"tape",
+                        "tape",
                         &TapeOpenOptions {
                             top_cache_size: ref_state.cache_size,
                             dir: state.dir.path().to_path_buf(),

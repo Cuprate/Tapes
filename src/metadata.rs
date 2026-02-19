@@ -152,6 +152,7 @@ impl MetadataBackingFiles {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(path.join(name))
         };
 
@@ -227,8 +228,8 @@ impl Default for StoredMetadata {
     }
 }
 
-const EPOCH: &'static [u8] = b"epoch";
-const TAPES: &'static [u8] = b"tapes";
+const EPOCH: &[u8] = b"epoch";
+const TAPES: &[u8] = b"tapes";
 
 fn serialise_metadata(epoch: u64, metadata: &ActiveMetadata) -> Vec<u8> {
     let mut hasher = blake2::Blake2b::new();
@@ -236,7 +237,7 @@ fn serialise_metadata(epoch: u64, metadata: &ActiveMetadata) -> Vec<u8> {
     let tapes_bytes = borsh::to_vec(&metadata).unwrap();
 
     hasher.update(EPOCH);
-    hasher.update(&epoch.to_le_bytes());
+    hasher.update(epoch.to_le_bytes());
     hasher.update(TAPES);
     hasher.update(&tapes_bytes);
 
@@ -256,17 +257,14 @@ fn try_read_metadata<R: Read>(r: &mut R) -> io::Result<StoredMetadata> {
     let mut hasher = blake2::Blake2b::new();
 
     hasher.update(EPOCH);
-    hasher.update(&metadata.epoch.to_le_bytes());
+    hasher.update(metadata.epoch.to_le_bytes());
     hasher.update(TAPES);
     hasher.update(&metadata.tapes);
 
     let hash: [u8; 32] = hasher.finalize().into();
 
     if hash != metadata.hash {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "Metadata hash mismatch",
-        ));
+        return Err(io::Error::other("Metadata hash mismatch"));
     }
 
     Ok(metadata)

@@ -60,14 +60,14 @@ impl<'a, E: bytemuck::Pod> Iterator for Iter<'a, E> {
             let entries_to_read = self.buf.len()
                 - (offset as usize + self.buf.len()).saturating_sub(self.tape_len as usize);
 
-            if entries_to_read != 0 {
-                if let Err(e) = self.tapes_read_transaction.read_entries(
+            if entries_to_read != 0
+                && let Err(e) = self.tapes_read_transaction.read_entries(
                     self.tape,
                     offset,
                     &mut self.buf[..entries_to_read],
-                ) {
-                    return Some(Err(e));
-                }
+                )
+            {
+                return Some(Err(e));
             }
         }
         Some(Ok(next))

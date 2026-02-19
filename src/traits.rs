@@ -95,7 +95,7 @@ pub trait TapesTruncate: TapesRead {
         let Some(entry) = self.read_entry(tape, len - 1)? else {
             return Ok(None);
         };
-        self.truncate_fixed_sized_tape(&tape, len - 1);
+        self.truncate_fixed_sized_tape(tape, len - 1);
 
         Ok(Some((len - 1, entry)))
     }
