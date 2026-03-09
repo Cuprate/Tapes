@@ -46,7 +46,7 @@ impl<'a, E: bytemuck::Pod> Iterator for Iter<'a, E> {
     type Item = io::Result<E>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.tape_len {
+        if self.start_index + self.index >= self.tape_len {
             return None;
         }
 

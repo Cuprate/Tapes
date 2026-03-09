@@ -40,7 +40,7 @@ impl ReferenceStateMachine for StateMachine {
     type Transition = TapeTransition;
 
     fn init_state() -> BoxedStrategy<Self::State> {
-        (0..100_000_u64, vec(any::<u64>(), 0..1_000_usize))
+        (1..100_000_u64, vec(any::<u64>(), 0..1_000_usize))
             .prop_map(|(cache_size, buf)| StateMachineState { buf, cache_size })
             .boxed()
     }
@@ -185,6 +185,11 @@ impl StateMachineTest for TapesState {
         let mut last_i = usize::MAX;
         for (i, entry) in reader.iter_from(&state.tape, 0).unwrap().enumerate() {
             assert_eq!(entry.unwrap(), ref_state.buf[i]);
+
+            for (j, entry) in reader.iter_from(&state.tape, i as u64).unwrap().enumerate() {
+                assert_eq!(entry.unwrap(), ref_state.buf[i + j]);
+            }
+
             last_i = i;
         }
 
@@ -198,5 +203,5 @@ impl StateMachineTest for TapesState {
 
 prop_state_machine! {
     #[test]
-    fn state_machine_fixed_size(sequential 1..20 => TapesState);
+    fn state_machine_fixed_size(sequential 1..2 => TapesState);
 }

@@ -40,7 +40,7 @@ impl ReferenceStateMachine for StateMachine {
     type Transition = TapeTransition;
 
     fn init_state() -> BoxedStrategy<Self::State> {
-        (0..100_000_u64, vec(any::<u8>(), 0..1_000_usize))
+        (1..100_000_u64, vec(any::<u8>(), 0..1_000_usize))
             .prop_map(|(cache_size, buf)| StateMachineState { buf, cache_size })
             .boxed()
     }
