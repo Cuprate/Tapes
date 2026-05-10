@@ -18,7 +18,7 @@ use crate::{
     traits::{TapesAppend, TapesRead, TapesTruncate, read_exact_at},
 };
 
-mod fixed_sized_iter;
+pub(crate) mod fixed_sized_iter;
 
 /// Configuration options for opening a tape.
 pub struct TapeOpenOptions {
@@ -305,29 +305,6 @@ impl TapesTruncate for TapesTruncateTransaction<'_> {
 /// so this should not be held for too long.
 pub struct TapesReadTransaction<'a> {
     metadata_guard: MetadataGuard<'a>,
-}
-
-impl<'a> TapesReadTransaction<'a> {
-    pub fn iter_from<'b, E: bytemuck::Pod>(
-        &'b self,
-        fixed_sized_tape: &'b FixedSizedTape<E>,
-        from: u64,
-    ) -> io::Result<fixed_sized_iter::Iter<'b, E>> {
-        let tape_len = *self
-            .metadata_guard
-            .get(fixed_sized_tape.inner.name)
-            .ok_or(io::Error::other("Tape not found"))?
-            / size_of::<E>() as u64;
-
-        if from > tape_len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Read past end of tape",
-            ));
-        }
-
-        fixed_sized_iter::Iter::new(fixed_sized_tape, self, from, tape_len)
-    }
 }
 
 impl TapesRead for TapesReadTransaction<'_> {

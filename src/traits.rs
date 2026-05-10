@@ -59,6 +59,31 @@ pub trait TapesRead {
             bytemuck::cast_slice_mut(buf),
         )
     }
+
+    /// Iterate from the given start value until the end of the tape.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if the start is past the end of the tape or on any other I/O error
+    /// when accessing the tape file.
+    fn iter_from<'b, E: bytemuck::Pod>(
+        &'b self,
+        fixed_sized_tape: &'b FixedSizedTape<E>,
+        from: u64,
+    ) -> io::Result<crate::tapes::fixed_sized_iter::Iter<'b, E, Self>> {
+        let tape_len = self
+            .fixed_sized_tape_len(fixed_sized_tape)
+            .ok_or(io::Error::other("Tape not found"))?;
+
+        if from > tape_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Read past end of tape",
+            ));
+        }
+
+        crate::tapes::fixed_sized_iter::Iter::new(fixed_sized_tape, self, from, tape_len)
+    }
 }
 
 pub trait TapesTruncate: TapesRead {

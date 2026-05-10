@@ -1,10 +1,10 @@
 use std::io;
 
-use crate::{FixedSizedTape, TapesRead, TapesReadTransaction};
+use crate::{FixedSizedTape, TapesRead};
 
-pub struct Iter<'a, E> {
+pub struct Iter<'a, E, T: ?Sized> {
     tape: &'a FixedSizedTape<E>,
-    tapes_read_transaction: &'a TapesReadTransaction<'a>,
+    tx: &'a T,
     start_index: u64,
 
     buf: Vec<E>,
@@ -13,10 +13,10 @@ pub struct Iter<'a, E> {
     tape_len: u64,
 }
 
-impl<'a, E: bytemuck::Pod> Iter<'a, E> {
+impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iter<'a, E, T> {
     pub(crate) fn new(
         tape: &'a FixedSizedTape<E>,
-        tapes_read_transaction: &'a TapesReadTransaction<'a>,
+        tx: &'a T,
         start_index: u64,
         tape_len: u64,
     ) -> io::Result<Self> {
@@ -28,12 +28,12 @@ impl<'a, E: bytemuck::Pod> Iter<'a, E> {
             buf.len() - (start_index as usize + buf.len()).saturating_sub(tape_len as usize);
 
         if entries_to_read != 0 {
-            tapes_read_transaction.read_entries(tape, start_index, &mut buf[..entries_to_read])?;
+            tx.read_entries(tape, start_index, &mut buf[..entries_to_read])?;
         }
 
         Ok(Self {
             tape,
-            tapes_read_transaction,
+            tx,
             start_index,
             buf,
             index: 0,
@@ -42,7 +42,7 @@ impl<'a, E: bytemuck::Pod> Iter<'a, E> {
     }
 }
 
-impl<'a, E: bytemuck::Pod> Iterator for Iter<'a, E> {
+impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iterator for Iter<'a, E, T> {
     type Item = io::Result<E>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -61,11 +61,9 @@ impl<'a, E: bytemuck::Pod> Iterator for Iter<'a, E> {
                 - (offset as usize + self.buf.len()).saturating_sub(self.tape_len as usize);
 
             if entries_to_read != 0
-                && let Err(e) = self.tapes_read_transaction.read_entries(
-                    self.tape,
-                    offset,
-                    &mut self.buf[..entries_to_read],
-                )
+                && let Err(e) =
+                    self.tx
+                        .read_entries(self.tape, offset, &mut self.buf[..entries_to_read])
             {
                 return Some(Err(e));
             }
