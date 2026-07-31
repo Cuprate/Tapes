@@ -62,15 +62,16 @@ impl Tapes {
     pub fn append(&self) -> TapesAppendTransaction<'_> {
         TapesAppendTransaction {
             metadata: &self.metadata,
-            metadata_guard: self.metadata.metadata(),
+            metadata_guard: self.metadata.metadata(true),
             modified_tapes: HashMap::new(),
+            committed: false,
         }
     }
 
     /// Starts a read transaction.
     pub fn reader(&self) -> TapesReadTransaction<'_> {
         TapesReadTransaction {
-            metadata_guard: self.metadata.metadata(),
+            metadata_guard: self.metadata.metadata(false),
         }
     }
 
@@ -78,7 +79,7 @@ impl Tapes {
     pub fn truncate(&self) -> TapesTruncateTransaction<'_> {
         TapesTruncateTransaction {
             metadata: &self.metadata,
-            metadata_guard: self.metadata.metadata(),
+            metadata_guard: self.metadata.metadata(false),
             modified_tapes: HashMap::new(),
         }
     }
@@ -89,6 +90,7 @@ pub struct TapesAppendTransaction<'a> {
     metadata: &'a Metadata,
     metadata_guard: MetadataGuard<'a>,
     modified_tapes: HashMap<&'static str, RingBufferFileWriter>,
+    committed: bool,
 }
 
 impl<'a> TapesAppendTransaction<'a> {
@@ -204,8 +206,8 @@ impl<'a> TapesAppendTransaction<'a> {
         }
     }
 
-    /// Commit this transaction, this transaction should not be used after this is called.
-    pub fn commit(&mut self, persistence: Persistence) -> io::Result<()> {
+    /// Commit and consume this transaction.
+    pub fn commit(mut self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
 
         for (&name, tape) in &mut self.modified_tapes {
@@ -215,9 +217,26 @@ impl<'a> TapesAppendTransaction<'a> {
         }
 
         self.metadata
-            .update_metadata(new_metadata, false, persistence);
+            .update_metadata(new_metadata, false, persistence)?;
+        self.committed = true;
 
         Ok(())
+    }
+}
+
+impl Drop for TapesAppendTransaction<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        for (&name, tape) in &self.modified_tapes {
+            let committed_len = self.metadata_guard.get(name).copied().unwrap_or(0);
+            debug_assert!(tape.len >= committed_len);
+
+            let appended = tape.len.saturating_sub(committed_len);
+            tape.ring_buffer.write().pop(appended as usize);
+        }
     }
 }
 
@@ -260,19 +279,28 @@ impl TapesAppend for TapesAppendTransaction<'_> {
 pub struct TapesTruncateTransaction<'a> {
     metadata: &'a Metadata,
     metadata_guard: MetadataGuard<'a>,
-    modified_tapes: HashMap<&'static str, u64>,
+    modified_tapes: HashMap<&'static str, TruncatedTape>,
+}
+
+struct TruncatedTape {
+    new_len: u64,
+    top_cache: Arc<RwLock<RingBuffer>>,
 }
 
 impl<'a> TapesTruncateTransaction<'a> {
-    pub fn commit(&mut self, persistence: Persistence) -> io::Result<()> {
+    pub fn commit(self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
 
-        for (&modified_tape, new_len) in &self.modified_tapes {
-            new_metadata.insert(modified_tape.into(), *new_len);
+        for (&name, tape) in &self.modified_tapes {
+            new_metadata.insert(name.into(), tape.new_len);
         }
 
         self.metadata
-            .update_metadata(new_metadata, true, persistence);
+            .update_metadata(new_metadata, true, persistence)?;
+
+        for tape in self.modified_tapes.values() {
+            tape.top_cache.write().truncate(tape.new_len as usize);
+        }
 
         Ok(())
     }
@@ -282,8 +310,8 @@ impl TapesRead for TapesTruncateTransaction<'_> {
     fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64> {
         self.modified_tapes
             .get(tape.name)
-            .or_else(|| self.metadata_guard.get(tape.name))
-            .copied()
+            .map(|tape| tape.new_len)
+            .or_else(|| self.metadata_guard.get(tape.name).copied())
     }
 }
 
@@ -292,10 +320,13 @@ impl TapesTruncate for TapesTruncateTransaction<'_> {
         let old_len = self.blob_tape_len(tape).unwrap();
         assert!(old_len >= new_len);
 
-        let mut top_cache = tape.top_cache.write();
-        top_cache.pop((old_len - new_len) as usize);
-
-        self.modified_tapes.insert(tape.name, new_len);
+        self.modified_tapes.insert(
+            tape.name,
+            TruncatedTape {
+                new_len,
+                top_cache: Arc::clone(&tape.top_cache),
+            },
+        );
     }
 }
 

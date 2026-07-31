@@ -1,7 +1,11 @@
 [package]
 name = "tapes"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+authors = ["Boog900"]
+license = "MIT"
+repository = "https://github.com/Cuprate/tapes"
+description = "A minimal database for storing data in contigious tapes"
 
 [dependencies]
 slab = { version = "0.4" }

@@ -84,30 +84,12 @@ impl Metadata {
         })
     }
 
-    pub fn metadata(&self) -> MetadataGuard<'_> {
-        let mut inner = self.inner.lock();
-
-        let epoch = inner.current_epoch;
-        let reader_slot = inner.reader_epochs.insert(epoch);
-
-        MetadataGuard {
-            active_metadata: inner.active_metadata.clone(),
-            metadata: self,
-            reader_slot,
-        }
-    }
-
-    pub fn update_metadata(
-        &self,
-        new_metadata: ActiveMetadata,
-        is_pop: bool,
-        persistence: Persistence,
-    ) {
+    pub fn metadata(&self, wait_for_old_readers: bool) -> MetadataGuard<'_> {
         let mut inner = self.inner.lock();
 
         // If the last op was a pop and this op is an append we need to wait for all readers to catch up
         // to the current epoch so they see the pop and we don't overwrite data they are reading.
-        if !is_pop
+        if wait_for_old_readers
             && inner.prev_op_was_pop
             && inner
                 .reader_epochs
@@ -124,15 +106,33 @@ impl Metadata {
             inner.writer_waiting = false;
         }
 
+        let epoch = inner.current_epoch;
+        let reader_slot = inner.reader_epochs.insert(epoch);
+
+        MetadataGuard {
+            active_metadata: inner.active_metadata.clone(),
+            metadata: self,
+            reader_slot,
+        }
+    }
+
+    pub fn update_metadata(
+        &self,
+        new_metadata: ActiveMetadata,
+        is_pop: bool,
+        persistence: Persistence,
+    ) -> io::Result<()> {
+        let mut inner = self.inner.lock();
+
         inner.current_epoch += 1;
         let epoch = inner.current_epoch;
         inner.files.update_metadata(epoch, &new_metadata);
+        inner.files.flush(persistence)?;
 
         inner.active_metadata = Arc::new(new_metadata);
-        inner.current_epoch += 1;
         inner.prev_op_was_pop = is_pop;
 
-        inner.files.flush(persistence).unwrap();
+        Ok(())
     }
 }
 

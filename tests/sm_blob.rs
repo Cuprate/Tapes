@@ -102,8 +102,6 @@ impl StateMachineTest for TapesState {
 
         append.commit(Persistence::SyncData).unwrap();
 
-        drop(append);
-
         TapesState { dir, tapes, tape }
     }
 
@@ -143,7 +141,6 @@ impl StateMachineTest for TapesState {
 
                 append.commit(Persistence::Buffer).unwrap();
 
-                drop(append);
                 state.tapes = tapes;
                 state.tape = tape;
             }

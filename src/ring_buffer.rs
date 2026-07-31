@@ -48,7 +48,10 @@ impl RingBuffer {
 
     /// Fully fill the given `buf` with data from the [`RingBuffer`], starting at the [`start`] index.
     pub fn fill(&self, mut start: usize, buf: &mut [u8]) {
-        let (first_slice, second_slice) = self.as_slices();
+        assert!(start + buf.len() <= self.buf.len());
+
+        let first_slice = &self.buf[self.start_idx..];
+        let second_slice = &self.buf[..self.start_idx];
 
         let bytes_to_copy = min(first_slice.len().saturating_sub(start), buf.len());
         if bytes_to_copy != 0 {
@@ -126,6 +129,18 @@ impl RingBuffer {
 
         self.len = self.len.saturating_sub(amount);
     }
+
+    pub(crate) fn truncate(&mut self, tape_len: usize) {
+        self.len = self.len.min(tape_len.saturating_sub(self.cache_start_idx));
+    }
+
+    fn prepare_write(&mut self, tape_len: usize) {
+        debug_assert!(self.len == 0 || self.cache_start_idx + self.len == tape_len);
+
+        if self.len == 0 {
+            self.cache_start_idx = tape_len;
+        }
+    }
 }
 
 /// A file writer that writes to a [`RingBuffer`] and flushes to disk periodically.
@@ -151,6 +166,7 @@ impl RingBufferFileWriter {
     /// Write some data to the tape.
     pub fn write(&mut self, data: &[u8]) -> io::Result<u64> {
         let mut ring_buffer = self.ring_buffer.write();
+        ring_buffer.prepare_write(self.len as usize);
         let capacity = ring_buffer.capacity();
 
         // Writing enough data to completely fill the ring buffer.
@@ -223,29 +239,27 @@ fn flush(
     tape_len: u64,
     persistence: Persistence,
 ) -> std::io::Result<()> {
-    if bytes_to_flush == 0 {
-        return Ok(());
-    }
+    if bytes_to_flush != 0 {
+        let (fist_slice, second_slice) = ring_buffer.as_slices();
+        match bytes_to_flush.cmp(&second_slice.len()) {
+            Ordering::Less | Ordering::Equal => {
+                write_all_at(
+                    file,
+                    &second_slice[second_slice.len() - bytes_to_flush..],
+                    tape_len - bytes_to_flush as u64,
+                )?;
+            }
+            Ordering::Greater => {
+                let first_slice_top_needed = bytes_to_flush - second_slice.len();
+                write_all_at(
+                    file,
+                    &fist_slice[fist_slice.len() - first_slice_top_needed..],
+                    tape_len - bytes_to_flush as u64,
+                )?;
+                bytes_to_flush -= first_slice_top_needed;
 
-    let (fist_slice, second_slice) = ring_buffer.as_slices();
-    match bytes_to_flush.cmp(&second_slice.len()) {
-        Ordering::Less | Ordering::Equal => {
-            write_all_at(
-                file,
-                &second_slice[second_slice.len() - bytes_to_flush..],
-                tape_len - bytes_to_flush as u64,
-            )?;
-        }
-        Ordering::Greater => {
-            let first_slice_top_needed = bytes_to_flush - second_slice.len();
-            write_all_at(
-                file,
-                &fist_slice[fist_slice.len() - first_slice_top_needed..],
-                tape_len - bytes_to_flush as u64,
-            )?;
-            bytes_to_flush -= first_slice_top_needed;
-
-            write_all_at(file, second_slice, tape_len - bytes_to_flush as u64)?;
+                write_all_at(file, second_slice, tape_len - bytes_to_flush as u64)?;
+            }
         }
     }
 

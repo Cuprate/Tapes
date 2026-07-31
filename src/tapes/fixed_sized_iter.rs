@@ -52,10 +52,7 @@ impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iterator for Iter<'a, E, T> {
 
         let index_to_buf = self.index as usize % self.buf.len();
 
-        let next = self.buf[index_to_buf];
-        self.index += 1;
-
-        if index_to_buf == self.buf.len() - 1 {
+        if self.index != 0 && index_to_buf == 0 {
             let offset = self.start_index + self.index;
             let entries_to_read = self.buf.len()
                 - (offset as usize + self.buf.len()).saturating_sub(self.tape_len as usize);
@@ -68,6 +65,10 @@ impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iterator for Iter<'a, E, T> {
                 return Some(Err(e));
             }
         }
+
+        let next = self.buf[index_to_buf];
+        self.index += 1;
+
         Some(Ok(next))
     }
 }

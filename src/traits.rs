@@ -36,6 +36,8 @@ pub trait TapesRead {
             return Ok(None);
         }
 
+        res?;
+
         Ok(Some(entry))
     }
 

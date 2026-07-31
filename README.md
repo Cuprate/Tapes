@@ -1,7 +1,3 @@
-# Work in progress
-
-Not everything is complete yet.
-
 # Tapes Database
 
 A specialised database for storing data in contiguous tapes.
