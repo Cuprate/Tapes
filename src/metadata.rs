@@ -16,13 +16,13 @@ use crate::Persistence;
 
 pub type ActiveMetadata = HashMap<Box<str>, u64>;
 
-pub struct MetadataGuard<'a> {
+pub struct MetadataGuard {
     active_metadata: Arc<ActiveMetadata>,
-    metadata: &'a Metadata,
+    metadata: Arc<Metadata>,
     reader_slot: usize,
 }
 
-impl<'a> Deref for MetadataGuard<'a> {
+impl Deref for MetadataGuard {
     type Target = ActiveMetadata;
 
     fn deref(&self) -> &Self::Target {
@@ -30,7 +30,7 @@ impl<'a> Deref for MetadataGuard<'a> {
     }
 }
 
-impl<'a> Drop for MetadataGuard<'a> {
+impl Drop for MetadataGuard {
     fn drop(&mut self) {
         let mut metadata_inner = self.metadata.inner.lock();
 
@@ -84,7 +84,7 @@ impl Metadata {
         })
     }
 
-    pub fn metadata(&self, wait_for_old_readers: bool) -> MetadataGuard<'_> {
+    pub fn metadata(self: &Arc<Self>, wait_for_old_readers: bool) -> MetadataGuard {
         let mut inner = self.inner.lock();
 
         // If the last op was a pop and this op is an append we need to wait for all readers to catch up
@@ -111,7 +111,7 @@ impl Metadata {
 
         MetadataGuard {
             active_metadata: inner.active_metadata.clone(),
-            metadata: self,
+            metadata: Arc::clone(self),
             reader_slot,
         }
     }

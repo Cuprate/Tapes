@@ -47,7 +47,7 @@ pub struct BlobTape {
 
 /// A tapes database.
 pub struct Tapes {
-    metadata: Metadata,
+    metadata: Arc<Metadata>,
 }
 
 impl Tapes {
@@ -55,13 +55,15 @@ impl Tapes {
     pub fn open(path: &Path) -> io::Result<Self> {
         let metadata = Metadata::open(path)?;
 
-        Ok(Self { metadata })
+        Ok(Self {
+            metadata: Arc::new(metadata),
+        })
     }
 
     /// Starts an append transaction.
-    pub fn append(&self) -> TapesAppendTransaction<'_> {
+    pub fn append(&self) -> TapesAppendTransaction {
         TapesAppendTransaction {
-            metadata: &self.metadata,
+            metadata: Arc::clone(&self.metadata),
             metadata_guard: self.metadata.metadata(true),
             modified_tapes: HashMap::new(),
             committed: false,
@@ -69,16 +71,16 @@ impl Tapes {
     }
 
     /// Starts a read transaction.
-    pub fn reader(&self) -> TapesReadTransaction<'_> {
+    pub fn reader(&self) -> TapesReadTransaction {
         TapesReadTransaction {
             metadata_guard: self.metadata.metadata(false),
         }
     }
 
     /// Starts a truncate transaction.
-    pub fn truncate(&self) -> TapesTruncateTransaction<'_> {
+    pub fn truncate(&self) -> TapesTruncateTransaction {
         TapesTruncateTransaction {
-            metadata: &self.metadata,
+            metadata: Arc::clone(&self.metadata),
             metadata_guard: self.metadata.metadata(false),
             modified_tapes: HashMap::new(),
         }
@@ -86,14 +88,14 @@ impl Tapes {
 }
 
 /// A tapes appender.
-pub struct TapesAppendTransaction<'a> {
-    metadata: &'a Metadata,
-    metadata_guard: MetadataGuard<'a>,
+pub struct TapesAppendTransaction {
+    metadata: Arc<Metadata>,
+    metadata_guard: MetadataGuard,
     modified_tapes: HashMap<&'static str, RingBufferFileWriter>,
     committed: bool,
 }
 
-impl<'a> TapesAppendTransaction<'a> {
+impl TapesAppendTransaction {
     /// Opens or creates a fixed-sized tape.
     pub fn open_fixed_sized_tape<E: bytemuck::NoUninit>(
         &mut self,
@@ -224,7 +226,7 @@ impl<'a> TapesAppendTransaction<'a> {
     }
 }
 
-impl Drop for TapesAppendTransaction<'_> {
+impl Drop for TapesAppendTransaction {
     fn drop(&mut self) {
         if self.committed {
             return;
@@ -240,7 +242,7 @@ impl Drop for TapesAppendTransaction<'_> {
     }
 }
 
-impl TapesRead for TapesAppendTransaction<'_> {
+impl TapesRead for TapesAppendTransaction {
     fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64> {
         self.modified_tapes
             .get(tape.name)
@@ -249,7 +251,7 @@ impl TapesRead for TapesAppendTransaction<'_> {
     }
 }
 
-impl TapesAppend for TapesAppendTransaction<'_> {
+impl TapesAppend for TapesAppendTransaction {
     fn append_bytes(&mut self, blob_tape: &BlobTape, buf: &[u8]) -> io::Result<u64> {
         let tape = match self.modified_tapes.get_mut(blob_tape.name) {
             Some(tape) => tape,
@@ -276,9 +278,9 @@ impl TapesAppend for TapesAppendTransaction<'_> {
     }
 }
 
-pub struct TapesTruncateTransaction<'a> {
-    metadata: &'a Metadata,
-    metadata_guard: MetadataGuard<'a>,
+pub struct TapesTruncateTransaction {
+    metadata: Arc<Metadata>,
+    metadata_guard: MetadataGuard,
     modified_tapes: HashMap<&'static str, TruncatedTape>,
 }
 
@@ -287,7 +289,7 @@ struct TruncatedTape {
     top_cache: Arc<RwLock<RingBuffer>>,
 }
 
-impl<'a> TapesTruncateTransaction<'a> {
+impl TapesTruncateTransaction {
     pub fn commit(self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
 
@@ -306,7 +308,7 @@ impl<'a> TapesTruncateTransaction<'a> {
     }
 }
 
-impl TapesRead for TapesTruncateTransaction<'_> {
+impl TapesRead for TapesTruncateTransaction {
     fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64> {
         self.modified_tapes
             .get(tape.name)
@@ -315,7 +317,7 @@ impl TapesRead for TapesTruncateTransaction<'_> {
     }
 }
 
-impl TapesTruncate for TapesTruncateTransaction<'_> {
+impl TapesTruncate for TapesTruncateTransaction {
     fn truncate_blob_tape(&mut self, tape: &BlobTape, new_len: u64) {
         let old_len = self.blob_tape_len(tape).unwrap();
         assert!(old_len >= new_len);
@@ -334,11 +336,11 @@ impl TapesTruncate for TapesTruncateTransaction<'_> {
 ///
 /// This will keep the view of the tapes consistent, while this is held, old data can't be overwritten,
 /// so this should not be held for too long.
-pub struct TapesReadTransaction<'a> {
-    metadata_guard: MetadataGuard<'a>,
+pub struct TapesReadTransaction {
+    metadata_guard: MetadataGuard,
 }
 
-impl TapesRead for TapesReadTransaction<'_> {
+impl TapesRead for TapesReadTransaction {
     /// Returns the number of bytes in a blob tape.
     ///
     /// Returns `None` if the tape doesn't exist.
