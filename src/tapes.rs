@@ -85,6 +85,35 @@ impl Tapes {
             modified_tapes: HashMap::new(),
         }
     }
+
+    /// Deletes a tape and its backing file.
+    ///
+    /// This method returns [`io::ErrorKind::WouldBlock`] if a transaction is still active.
+    pub fn delete_tape(&mut self, name: &str, options: &TapeOpenOptions) -> io::Result<()> {
+        if Arc::strong_count(&self.metadata) != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "cannot delete a tape while a transaction is active",
+            ));
+        }
+
+        let metadata_guard = self.metadata.metadata(false);
+
+        if metadata_guard.contains_key(name) {
+            let mut new_metadata = metadata_guard.clone();
+            new_metadata.remove(name);
+            self.metadata
+                .update_metadata(new_metadata, true, Persistence::SyncAll)?;
+        }
+
+        drop(metadata_guard);
+
+        match std::fs::remove_file(options.dir.join(name)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// A tapes appender.
