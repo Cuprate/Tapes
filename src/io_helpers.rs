@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::io;
+use std::{fs::File, io};
 
 pub(crate) fn read_exact_at_file(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]

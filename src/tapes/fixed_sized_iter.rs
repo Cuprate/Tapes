@@ -1,5 +1,4 @@
-use std::cmp::max;
-use std::io;
+use std::{cmp::max, io};
 
 use crate::{BlobTape, FixedSizedTape, TapesRead};
 
