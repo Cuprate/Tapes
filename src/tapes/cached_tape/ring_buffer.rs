@@ -1,13 +1,4 @@
-use std::{
-    cmp::{Ordering, min},
-    fs::File,
-    io,
-    sync::Arc,
-};
-
-use parking_lot::RwLock;
-
-use crate::Persistence;
+use std::cmp::min;
 
 /// A simple ring buffer to cache the top of a tape.
 #[derive(Debug)]
@@ -134,138 +125,11 @@ impl RingBuffer {
         self.len = self.len.min(tape_len.saturating_sub(self.cache_start_idx));
     }
 
-    fn prepare_write(&mut self, tape_len: usize) {
+    pub(crate) fn prepare_write(&mut self, tape_len: usize) {
         debug_assert!(self.len == 0 || self.cache_start_idx + self.len == tape_len);
 
         if self.len == 0 {
             self.cache_start_idx = tape_len;
         }
-    }
-}
-
-/// A file writer that writes to a [`RingBuffer`] and flushes to disk periodically.
-pub struct RingBufferFileWriter {
-    pub(crate) ring_buffer: Arc<RwLock<RingBuffer>>,
-    pub(crate) bytes_to_flush: usize,
-    pub(crate) file: Arc<File>,
-    pub(crate) len: u64,
-}
-
-impl RingBufferFileWriter {
-    /// Flush the buffer to disk.
-    pub fn flush(&mut self, persistence: Persistence) -> io::Result<()> {
-        flush(
-            &self.file,
-            &self.ring_buffer.read(),
-            self.bytes_to_flush,
-            self.len,
-            persistence,
-        )
-    }
-
-    /// Write some data to the tape.
-    pub fn write(&mut self, data: &[u8]) -> io::Result<u64> {
-        let mut ring_buffer = self.ring_buffer.write();
-        ring_buffer.prepare_write(self.len as usize);
-        let capacity = ring_buffer.capacity();
-
-        // Writing enough data to completely fill the ring buffer.
-        if data.len() >= capacity {
-            flush(
-                &self.file,
-                &ring_buffer,
-                self.bytes_to_flush,
-                self.len,
-                Persistence::Buffer,
-            )?;
-            self.bytes_to_flush = 0;
-
-            write_all_at(&self.file, data, self.len)?;
-
-            ring_buffer.push(&data[data.len() - capacity..], data.len() - capacity)
-        }
-        // Writing enough data to push data that hasn't been flushed to disk yet out of the ring buffer.
-        else if self.bytes_to_flush + data.len() > capacity {
-            // Just flush everything that needs to be flushed to disk to reduce the number of flushes.
-            flush(
-                &self.file,
-                &ring_buffer,
-                self.bytes_to_flush,
-                self.len,
-                Persistence::Buffer,
-            )?;
-            self.bytes_to_flush = 0;
-
-            self.bytes_to_flush += data.len();
-            ring_buffer.push(data, 0)
-        }
-        // Writing data that won't push data that hasn't been flushed to disk yet out of the ring buffer.
-        else {
-            self.bytes_to_flush += data.len();
-            ring_buffer.push(data, 0)
-        }
-
-        let old_len = self.len;
-        self.len += data.len() as u64;
-
-        Ok(old_len)
-    }
-}
-
-fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-
-        file.write_all_at(buf, offset)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-
-        let n = file.seek_write(buf, offset)?;
-        if n != buf.len() {
-            return Err(io::Error::other("Failed to write all bytes to tape"));
-        }
-
-        Ok(())
-    }
-}
-
-fn flush(
-    file: &File,
-    ring_buffer: &RingBuffer,
-    mut bytes_to_flush: usize,
-    tape_len: u64,
-    persistence: Persistence,
-) -> std::io::Result<()> {
-    if bytes_to_flush != 0 {
-        let (fist_slice, second_slice) = ring_buffer.as_slices();
-        match bytes_to_flush.cmp(&second_slice.len()) {
-            Ordering::Less | Ordering::Equal => {
-                write_all_at(
-                    file,
-                    &second_slice[second_slice.len() - bytes_to_flush..],
-                    tape_len - bytes_to_flush as u64,
-                )?;
-            }
-            Ordering::Greater => {
-                let first_slice_top_needed = bytes_to_flush - second_slice.len();
-                write_all_at(
-                    file,
-                    &fist_slice[fist_slice.len() - first_slice_top_needed..],
-                    tape_len - bytes_to_flush as u64,
-                )?;
-                bytes_to_flush -= first_slice_top_needed;
-
-                write_all_at(file, second_slice, tape_len - bytes_to_flush as u64)?;
-            }
-        }
-    }
-
-    match persistence {
-        Persistence::Buffer => Ok(()),
-        Persistence::SyncData => file.sync_data(),
-        Persistence::SyncAll => file.sync_all(),
     }
 }

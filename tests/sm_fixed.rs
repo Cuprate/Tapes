@@ -4,7 +4,8 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use std::fmt::{Debug, Formatter};
 
 use tapes::{
-    FixedSizedTape, Persistence, TapeOpenOptions, Tapes, TapesAppend, TapesRead, TapesTruncate,
+    CachedBlobTape, CachedTapeOpenOptions, FixedSizedTape, Persistence, Tapes, TapesAppend,
+    TapesRead, TapesTruncate, WholeBlobTape, WholeTapeOpenOptions,
 };
 
 #[derive(Clone, Debug)]
@@ -18,7 +19,7 @@ struct TapesState {
     dir: tempfile::TempDir,
 
     tapes: Tapes,
-    tape: FixedSizedTape<u64>,
+    tape: FixedSizedTape<u64, CachedBlobTape<WholeBlobTape>>,
 }
 
 impl Debug for TapesState {
@@ -91,11 +92,13 @@ impl StateMachineTest for TapesState {
         let mut append = tapes.append();
 
         let tape = append
-            .open_fixed_sized_tape(
+            .open_fixed_sized_tape::<u64, CachedBlobTape<WholeBlobTape>>(
                 "tape",
-                &TapeOpenOptions {
+                CachedTapeOpenOptions {
+                    inner: WholeTapeOpenOptions {
+                        dir: dir.path().to_path_buf(),
+                    },
                     top_cache_size: ref_state.cache_size,
-                    dir: dir.path().to_path_buf(),
                 },
             )
             .unwrap();
@@ -126,7 +129,7 @@ impl StateMachineTest for TapesState {
                 let low = amt / 2;
                 let high = amt - low;
 
-                truncate.drop_fixed_sized_tape(&state.tape, low);
+                truncate.drop_fixed_sized_tape(&state.tape, low).unwrap();
 
                 for _ in 0..high {
                     truncate.pop_fixed_sized_tape(&state.tape).unwrap();
@@ -139,11 +142,13 @@ impl StateMachineTest for TapesState {
                 let mut append = tapes.append();
 
                 let tape = append
-                    .open_fixed_sized_tape(
+                    .open_fixed_sized_tape::<u64, CachedBlobTape<WholeBlobTape>>(
                         "tape",
-                        &TapeOpenOptions {
+                        CachedTapeOpenOptions {
+                            inner: WholeTapeOpenOptions {
+                                dir: state.dir.path().to_path_buf(),
+                            },
                             top_cache_size: ref_state.cache_size,
-                            dir: state.dir.path().to_path_buf(),
                         },
                     )
                     .unwrap();

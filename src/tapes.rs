@@ -1,48 +1,35 @@
 use std::{
-    cmp::min,
+    cmp::{max, min},
     collections::HashMap,
-    fs::{File, OpenOptions},
     io,
     marker::PhantomData,
     ops::Deref,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
-use parking_lot::RwLock;
-
 use crate::{
     Persistence,
-    metadata::{Metadata, MetadataGuard},
-    ring_buffer::{RingBuffer, RingBufferFileWriter},
-    traits::{TapesAppend, TapesRead, TapesTruncate, read_exact_at},
+    metadata::{Metadata, MetadataGuard, TapeMetadata},
+    traits::{BlobTape, BlobTapeWriter, OpenConfig, TapesAppend, TapesRead, TapesTruncate},
 };
 
+mod cached_tape;
 pub(crate) mod fixed_sized_iter;
+mod rolling_tape;
+mod whole_tape;
 
-/// Configuration options for opening a tape.
-pub struct TapeOpenOptions {
-    /// The size of the top cache in bytes, this amount of data from the top of the tape will be cached in memory.
-    pub top_cache_size: u64,
-    /// The directory to store the tapes.
-    pub dir: PathBuf,
-}
+pub use cached_tape::{CachedBlobTape, CachedTapeOpenOptions};
+
+pub use rolling_tape::{RollingBlobTape, RollingTapeOpenOptions};
+pub use whole_tape::{WholeBlobTape, WholeTapeOpenOptions};
 
 /// A handle to a fixed-sized tape.
 ///
 /// Only a single handle to a tape should be opened.
-pub struct FixedSizedTape<E> {
-    pub(crate) inner: BlobTape,
+pub struct FixedSizedTape<E, B: BlobTape> {
+    pub(crate) inner: B,
     phantom_data: PhantomData<E>,
-}
-
-/// A handle to a blob tape.
-///
-/// Only a single handle to a tape should be opened.
-pub struct BlobTape {
-    name: &'static str,
-    pub(crate) file: Arc<File>,
-    pub top_cache: Arc<RwLock<RingBuffer>>,
 }
 
 /// A tapes database.
@@ -53,7 +40,7 @@ pub struct Tapes {
 impl Tapes {
     /// Open a tapes database, with metadata stored at `path`.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let metadata = Metadata::open(path)?;
+        let metadata = Metadata::open(&path.join("tapes"))?;
 
         Ok(Self {
             metadata: Arc::new(metadata),
@@ -86,10 +73,10 @@ impl Tapes {
         }
     }
 
-    /// Deletes a tape and its backing file.
+    /// Deletes a tape.
     ///
-    /// This method returns [`io::ErrorKind::WouldBlock`] if a transaction is still active.
-    pub fn delete_tape(&mut self, name: &str, options: &TapeOpenOptions) -> io::Result<()> {
+    /// No other transactions or [`Tapes`] instances may be active, otherwise this returns an error.
+    pub fn delete_tape<B: BlobTape>(&self, tape: B) -> io::Result<()> {
         if Arc::strong_count(&self.metadata) != 1 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -99,20 +86,16 @@ impl Tapes {
 
         let metadata_guard = self.metadata.metadata(false);
 
-        if metadata_guard.contains_key(name) {
+        if metadata_guard.contains_key(tape.name()) {
             let mut new_metadata = metadata_guard.clone();
-            new_metadata.remove(name);
+            new_metadata.remove(tape.name());
             self.metadata
                 .update_metadata(new_metadata, true, Persistence::SyncAll)?;
         }
 
         drop(metadata_guard);
 
-        match std::fs::remove_file(options.dir.join(name)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+        tape.delete()
     }
 }
 
@@ -120,23 +103,28 @@ impl Tapes {
 pub struct TapesAppendTransaction {
     metadata: Arc<Metadata>,
     metadata_guard: MetadataGuard,
-    modified_tapes: HashMap<&'static str, RingBufferFileWriter>,
+    modified_tapes: HashMap<&'static str, (Box<dyn BlobTapeWriter>, u64)>,
     committed: bool,
 }
 
 impl TapesAppendTransaction {
+    /// Checks if a tape exists.
+    pub fn tape_exists(&self, name: &'static str) -> bool {
+        self.metadata_guard.contains_key(name) || self.modified_tapes.contains_key(name)
+    }
+
     /// Opens or creates a fixed-sized tape.
-    pub fn open_fixed_sized_tape<E: bytemuck::NoUninit>(
+    pub fn open_fixed_sized_tape<E: bytemuck::NoUninit, B: BlobTape>(
         &mut self,
         name: &'static str,
-        options: &TapeOpenOptions,
-    ) -> io::Result<FixedSizedTape<E>> {
+        options: B::OpenConfig,
+    ) -> io::Result<FixedSizedTape<E, B>> {
         let inner = self.open_blob_tape(name, options)?;
 
         if self
             .metadata_guard
             .get(name)
-            .is_some_and(|len| !(*len as usize).is_multiple_of(size_of::<E>()))
+            .is_some_and(|metadata| !(metadata.len as usize).is_multiple_of(size_of::<E>()))
         {
             return Err(io::Error::other(
                 "Tape size is not a multiple of entry size",
@@ -150,106 +138,53 @@ impl TapesAppendTransaction {
     }
 
     /// Opens or creates a blob tape.
-    pub fn open_blob_tape(
+    pub fn open_blob_tape<B: BlobTape>(
         &mut self,
         name: &'static str,
-        options: &TapeOpenOptions,
-    ) -> io::Result<BlobTape> {
-        match OpenOptions::new()
-            .write(true)
-            .read(true)
-            .open(options.dir.join(name))
-        {
-            Ok(file) => {
-                let len = *self.metadata_guard.get(name).unwrap_or(&0);
+        options: B::OpenConfig,
+    ) -> io::Result<B> {
+        let metadata = self.metadata_guard.get(name).copied();
+        let start_index = metadata.map_or(options.start_index(), |m| m.start);
+        let len = metadata.map_or(start_index, |m| m.len);
 
-                if file.metadata()?.len() < len {
-                    return Err(io::Error::other("Tape file is too small"));
-                }
+        let tape = B::open(name, metadata, self.metadata_guard.epoch, options)?;
+        let w = tape.writer(len)?;
 
-                let mut ring_buffer = RingBuffer::new(options.top_cache_size as usize, 0);
-                let buf = ring_buffer.reset(
-                    min(len, options.top_cache_size) as usize,
-                    len.saturating_sub(options.top_cache_size) as usize,
-                );
+        self.modified_tapes.insert(name, (Box::new(w), start_index));
 
-                read_exact_at(&file, buf, len - buf.len() as u64)?;
-
-                let top_cache = Arc::new(RwLock::new(ring_buffer));
-                let file = Arc::new(file);
-
-                if self.metadata_guard.get(name).is_none() {
-                    self.modified_tapes.insert(
-                        name,
-                        RingBufferFileWriter {
-                            ring_buffer: top_cache.clone(),
-                            bytes_to_flush: 0,
-                            file: file.clone(),
-                            len,
-                        },
-                    );
-                }
-
-                Ok(BlobTape {
-                    name,
-                    file,
-                    top_cache,
-                })
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                if self.metadata_guard.get(name).is_some() {
-                    return Err(io::Error::other(
-                        "tape was in metadata but file was not found.",
-                    ));
-                }
-
-                let file = Arc::new(
-                    OpenOptions::new()
-                        .write(true)
-                        .read(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(options.dir.join(name))?,
-                );
-
-                let top_cache = Arc::new(RwLock::new(RingBuffer::new(
-                    options.top_cache_size as usize,
-                    0,
-                )));
-
-                self.modified_tapes.insert(
-                    name,
-                    RingBufferFileWriter {
-                        ring_buffer: top_cache.clone(),
-                        bytes_to_flush: 0,
-                        file: file.clone(),
-                        len: 0,
-                    },
-                );
-
-                Ok(BlobTape {
-                    name,
-                    file,
-                    top_cache,
-                })
-            }
-            Err(e) => Err(e),
-        }
+        Ok(tape)
     }
 
     /// Commit and consume this transaction.
     pub fn commit(mut self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
 
-        for (&name, tape) in &mut self.modified_tapes {
+        for (&name, (tape, start_index)) in &mut self.modified_tapes {
             tape.flush(persistence)?;
 
-            new_metadata.insert(name.into(), tape.len);
+            let metadata = TapeMetadata {
+                len: tape.len(),
+                start: *start_index,
+            };
+
+            new_metadata.insert(name.into(), metadata);
         }
 
         self.metadata
-            .update_metadata(new_metadata, false, persistence)?;
+            .update_metadata(new_metadata.clone(), false, persistence)?;
         self.committed = true;
+
+        let oldest_reader = self
+            .metadata
+            .oldest_reader_excluding_reader(&self.metadata_guard)
+            .unwrap_or(self.metadata_guard.epoch + 1);
+        for (&name, (tape, _)) in &mut self.modified_tapes {
+            tape.remove_old_files(
+                *new_metadata.get(name).unwrap(),
+                self.metadata_guard.epoch,
+                oldest_reader,
+            )?;
+        }
 
         Ok(())
     }
@@ -261,103 +196,184 @@ impl Drop for TapesAppendTransaction {
             return;
         }
 
-        for (&name, tape) in &self.modified_tapes {
-            let committed_len = self.metadata_guard.get(name).copied().unwrap_or(0);
-            debug_assert!(tape.len >= committed_len);
+        for (&name, (tape, _)) in &mut self.modified_tapes {
+            let committed_len = self
+                .metadata_guard
+                .get(name)
+                .copied()
+                .unwrap_or_default()
+                .len;
+            debug_assert!(tape.len() >= committed_len);
 
-            let appended = tape.len.saturating_sub(committed_len);
-            tape.ring_buffer.write().pop(appended as usize);
+            let appended = tape.len().saturating_sub(committed_len);
+            tape.revert(appended as usize);
         }
     }
 }
 
 impl TapesRead for TapesAppendTransaction {
-    fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64> {
+    fn blob_tape_len<B: BlobTape>(&self, tape: &B) -> Option<u64> {
         self.modified_tapes
-            .get(tape.name)
-            .map(|tape| tape.len)
-            .or_else(|| self.metadata_guard.get(tape.name).copied())
+            .get(tape.name())
+            .map(|tape| tape.0.len())
+            .or_else(|| {
+                self.metadata_guard
+                    .get(tape.name())
+                    .map(|metadata| metadata.len)
+            })
+    }
+
+    fn blob_tape_start<B: BlobTape>(&self, tape: &B) -> Option<u64> {
+        self.modified_tapes
+            .get(tape.name())
+            .map(|tape| tape.1)
+            .or_else(|| {
+                self.metadata_guard
+                    .get(tape.name())
+                    .map(|metadata| metadata.start)
+            })
     }
 }
 
 impl TapesAppend for TapesAppendTransaction {
-    fn append_bytes(&mut self, blob_tape: &BlobTape, buf: &[u8]) -> io::Result<u64> {
-        let tape = match self.modified_tapes.get_mut(blob_tape.name) {
+    fn append_bytes<B: BlobTape>(&mut self, blob_tape: &B, buf: &[u8]) -> io::Result<u64> {
+        let tape = match self.modified_tapes.get_mut(blob_tape.name()) {
             Some(tape) => tape,
             None => {
-                let tape_len = *self
+                let metadata = self
                     .metadata_guard
-                    .get(blob_tape.name)
+                    .get(blob_tape.name())
                     .ok_or(io::Error::other("Tape does not exist"))?;
-                self.modified_tapes.insert(
-                    blob_tape.name,
-                    RingBufferFileWriter {
-                        ring_buffer: Arc::clone(&blob_tape.top_cache),
-                        bytes_to_flush: 0,
-                        file: Arc::clone(&blob_tape.file),
-                        len: tape_len,
-                    },
-                );
 
-                self.modified_tapes.get_mut(blob_tape.name).unwrap()
+                let w = blob_tape.writer(metadata.len)?;
+
+                self.modified_tapes
+                    .insert(blob_tape.name(), (Box::new(w), metadata.start));
+
+                self.modified_tapes.get_mut(blob_tape.name()).unwrap()
             }
         };
 
-        tape.write(buf)
+        tape.0.write_bytes(buf)
+    }
+
+    fn shift_start_idx<B: BlobTape>(&mut self, blob_tape: &B, new_start: u64) -> io::Result<()> {
+        let tape = match self.modified_tapes.get_mut(blob_tape.name()) {
+            Some(tape) => tape,
+            None => {
+                let metadata = self
+                    .metadata_guard
+                    .get(blob_tape.name())
+                    .ok_or(io::Error::other("Tape does not exist"))?;
+
+                let w = blob_tape.writer(metadata.len)?;
+
+                self.modified_tapes
+                    .insert(blob_tape.name(), (Box::new(w), metadata.start));
+
+                self.modified_tapes.get_mut(blob_tape.name()).unwrap()
+            }
+        };
+
+        if tape.0.len() < new_start {
+            return Err(io::Error::other(
+                "Start index cannot be set past the length of the tape",
+            ));
+        }
+
+        tape.1 = max(new_start, tape.1);
+
+        Ok(())
     }
 }
 
+/// A tapes truncator.
 pub struct TapesTruncateTransaction {
     metadata: Arc<Metadata>,
     metadata_guard: MetadataGuard,
-    modified_tapes: HashMap<&'static str, TruncatedTape>,
-}
-
-struct TruncatedTape {
-    new_len: u64,
-    top_cache: Arc<RwLock<RingBuffer>>,
+    modified_tapes: HashMap<&'static str, Box<dyn BlobTapeWriter>>,
 }
 
 impl TapesTruncateTransaction {
-    pub fn commit(self, persistence: Persistence) -> io::Result<()> {
+    /// Commit and consume this transaction.
+    pub fn commit(mut self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
 
         for (&name, tape) in &self.modified_tapes {
-            new_metadata.insert(name.into(), tape.new_len);
+            let start = min(
+                new_metadata.get(name).map(|m| m.start).unwrap_or_default(),
+                tape.len(),
+            );
+
+            new_metadata.insert(
+                name.into(),
+                TapeMetadata {
+                    len: tape.len(),
+                    start,
+                },
+            );
+        }
+
+        for tape in self.modified_tapes.values_mut() {
+            tape.flush(persistence)?;
         }
 
         self.metadata
             .update_metadata(new_metadata, true, persistence)?;
-
-        for tape in self.modified_tapes.values() {
-            tape.top_cache.write().truncate(tape.new_len as usize);
-        }
 
         Ok(())
     }
 }
 
 impl TapesRead for TapesTruncateTransaction {
-    fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64> {
+    fn blob_tape_len<B: BlobTape>(&self, tape: &B) -> Option<u64> {
         self.modified_tapes
-            .get(tape.name)
-            .map(|tape| tape.new_len)
-            .or_else(|| self.metadata_guard.get(tape.name).copied())
+            .get(tape.name())
+            .map(|tape| tape.len())
+            .or_else(|| {
+                self.metadata_guard
+                    .get(tape.name())
+                    .map(|metadata| metadata.len)
+            })
+    }
+
+    fn blob_tape_start<B: BlobTape>(&self, tape: &B) -> Option<u64> {
+        self.metadata_guard
+            .get(tape.name())
+            .map(|metadata| metadata.start)
     }
 }
 
 impl TapesTruncate for TapesTruncateTransaction {
-    fn truncate_blob_tape(&mut self, tape: &BlobTape, new_len: u64) {
-        let old_len = self.blob_tape_len(tape).unwrap();
-        assert!(old_len >= new_len);
+    fn truncate_blob_tape<B: BlobTape>(&mut self, tape: &B, new_len: u64) -> io::Result<()> {
+        let Some(old_len) = self.blob_tape_len(tape) else {
+            return Err(io::Error::other("Tape does not exist"));
+        };
 
-        self.modified_tapes.insert(
-            tape.name,
-            TruncatedTape {
-                new_len,
-                top_cache: Arc::clone(&tape.top_cache),
-            },
-        );
+        if old_len < new_len {
+            return Err(io::Error::other(
+                "Cannot truncate a tape to a longer length",
+            ));
+        }
+
+        let tape = match self.modified_tapes.get_mut(tape.name()) {
+            Some(tape) => tape,
+            None => {
+                let tape_len = self
+                    .metadata_guard
+                    .get(tape.name())
+                    .ok_or(io::Error::other("Tape does not exist"))?
+                    .len;
+                self.modified_tapes
+                    .insert(tape.name(), Box::new(tape.writer(tape_len)?));
+
+                self.modified_tapes.get_mut(tape.name()).unwrap()
+            }
+        };
+
+        tape.truncate(new_len);
+
+        Ok(())
     }
 }
 
@@ -373,7 +389,15 @@ impl TapesRead for TapesReadTransaction {
     /// Returns the number of bytes in a blob tape.
     ///
     /// Returns `None` if the tape doesn't exist.
-    fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64> {
-        self.metadata_guard.get(tape.name).copied()
+    fn blob_tape_len<B: BlobTape>(&self, tape: &B) -> Option<u64> {
+        self.metadata_guard
+            .get(tape.name())
+            .map(|metadata| metadata.len)
+    }
+
+    fn blob_tape_start<B: BlobTape>(&self, tape: &B) -> Option<u64> {
+        self.metadata_guard
+            .get(tape.name())
+            .map(|metadata| metadata.start)
     }
 }
