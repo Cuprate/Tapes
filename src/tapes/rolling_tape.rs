@@ -67,6 +67,10 @@ impl BlobTape for RollingBlobTape {
         current_epoch: u64,
         config: Self::OpenConfig,
     ) -> io::Result<Self> {
+        if config.file_size == 0 {
+            return Err(io::Error::other("file_size must not be 0."));
+        }
+
         let path = config.dir.join("tapes").join(name);
 
         if tape_metadata.is_none() {
