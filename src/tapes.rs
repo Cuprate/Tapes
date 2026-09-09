@@ -53,6 +53,7 @@ impl Tapes {
             metadata: Arc::clone(&self.metadata),
             metadata_guard: self.metadata.metadata(true),
             modified_tapes: HashMap::new(),
+            deleted_tapes: Vec::new(),
             committed: false,
         }
     }
@@ -72,38 +73,15 @@ impl Tapes {
             modified_tapes: HashMap::new(),
         }
     }
-
-    /// Deletes a tape.
-    ///
-    /// No other transactions or [`Tapes`] instances may be active, otherwise this returns an error.
-    pub fn delete_tape<B: BlobTape>(&self, tape: B) -> io::Result<()> {
-        if Arc::strong_count(&self.metadata) != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "cannot delete a tape while a transaction is active",
-            ));
-        }
-
-        let metadata_guard = self.metadata.metadata(false);
-
-        if metadata_guard.contains_key(tape.name()) {
-            let mut new_metadata = metadata_guard.clone();
-            new_metadata.remove(tape.name());
-            self.metadata
-                .update_metadata(new_metadata, true, Persistence::SyncAll)?;
-        }
-
-        drop(metadata_guard);
-
-        tape.delete()
-    }
 }
 
 /// A tapes appender.
+#[expect(clippy::type_complexity)]
 pub struct TapesAppendTransaction {
     metadata: Arc<Metadata>,
     metadata_guard: MetadataGuard,
     modified_tapes: HashMap<&'static str, (Box<dyn BlobTapeWriter>, u64)>,
+    deleted_tapes: Vec<(&'static str, Box<dyn FnOnce() -> io::Result<()>>)>,
     committed: bool,
 }
 
@@ -155,7 +133,29 @@ impl TapesAppendTransaction {
         Ok(tape)
     }
 
+    /// Deletes a tape.
+    ///
+    /// The deletion takes effect when the transaction is committed. Dropping the transaction
+    /// without committing keeps the tape.
+    ///
+    /// Deleting a tape that is also modified in this transaction is not supported and may cause an
+    /// error.
+    ///
+    /// No other transactions should be active during a write transaction that deletes a tape.
+    pub fn delete_tape<B: BlobTape + 'static>(&mut self, tape: B) {
+        self.deleted_tapes
+            .push((tape.name(), Box::new(move || tape.delete())));
+    }
+
     /// Commit and consume this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Fails if flushing a tape, updating the metadata, or deleting a tape fails.
+    ///
+    /// If several tapes are deleted and one of the deletions fails, the metadata update and the
+    /// deletions that already succeeded are not rolled back, which can leave orphaned tape files
+    /// behind.
     pub fn commit(mut self, persistence: Persistence) -> io::Result<()> {
         let mut new_metadata = self.metadata_guard.deref().clone();
 
@@ -170,9 +170,19 @@ impl TapesAppendTransaction {
             new_metadata.insert(name.into(), metadata);
         }
 
+        let mut delete_tape_fns = Vec::with_capacity(self.deleted_tapes.len());
+        for (name, tape) in self.deleted_tapes.drain(..) {
+            new_metadata.remove(name);
+            delete_tape_fns.push(tape);
+        }
+
         self.metadata
             .update_metadata(new_metadata.clone(), false, persistence)?;
         self.committed = true;
+
+        for delete in delete_tape_fns.drain(..) {
+            delete()?;
+        }
 
         let oldest_reader = self
             .metadata

@@ -1,5 +1,3 @@
-use std::io;
-
 use tapes::{Persistence, Tapes, TapesAppend, TapesRead, WholeBlobTape, WholeTapeOpenOptions};
 
 #[test]
@@ -26,7 +24,11 @@ fn delete_blob_tape() {
     let tape_dir = dir.path().join("tapes").join("blob");
     assert!(tape_dir.exists());
 
-    tapes.delete_tape(tape).unwrap();
+    {
+        let mut append = tapes.append();
+        append.delete_tape(tape);
+        append.commit(Persistence::Buffer).unwrap();
+    }
 
     assert!(!tape_dir.exists());
 
@@ -37,7 +39,7 @@ fn delete_blob_tape() {
 }
 
 #[test]
-fn refuses_to_delete_while_a_transaction_is_active() {
+fn delete_wins_over_modification_in_the_same_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let tapes = Tapes::open(dir.path()).unwrap();
 
@@ -47,13 +49,26 @@ fn refuses_to_delete_while_a_transaction_is_active() {
 
     let mut append = tapes.append();
     let tape = append
-        .open_blob_tape::<WholeBlobTape>("blob", options)
+        .open_blob_tape::<WholeBlobTape>("blob", options.clone())
         .unwrap();
     append.append_bytes(&tape, b"contents").unwrap();
     append.commit(Persistence::Buffer).unwrap();
 
-    let _reader = tapes.reader();
+    let tape_dir = dir.path().join("tapes").join("blob");
+    assert!(tape_dir.exists());
 
-    let err = tapes.delete_tape(tape).unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    let mut append = tapes.append();
+    let tape = append
+        .open_blob_tape::<WholeBlobTape>("blob", options)
+        .unwrap();
+    append.append_bytes(&tape, b"more").unwrap();
+    append.delete_tape(tape);
+    append.commit(Persistence::Buffer).unwrap();
+
+    assert!(!tape_dir.exists());
+
+    {
+        let append = tapes.append();
+        assert!(!append.tape_exists("blob"));
+    }
 }

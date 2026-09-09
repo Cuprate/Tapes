@@ -307,7 +307,11 @@ fn rolling_delete() {
 
     assert!(tape_dir(&dir).exists());
 
-    tapes.delete_tape(tape).unwrap();
+    {
+        let mut append = tapes.append();
+        append.delete_tape(tape);
+        append.commit(Persistence::Buffer).unwrap();
+    }
 
     assert!(!tape_dir(&dir).exists());
     {
