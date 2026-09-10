@@ -416,7 +416,11 @@ fn remove_old_files(
     let mut i = 1;
     while let Some(file_2) = files.get(i) {
         if file_index_to_offset(file_2.file_index, file_size) <= metadata.start {
-            files.get_mut(i - 1).unwrap().out_of_range_at_epoch = Some(current_epoch);
+            files
+                .get_mut(i - 1)
+                .unwrap()
+                .out_of_range_at_epoch
+                .get_or_insert(current_epoch);
         }
 
         i += 1;
