@@ -14,12 +14,19 @@ use slab::Slab;
 
 use crate::Persistence;
 
-pub type ActiveMetadata = HashMap<Box<str>, u64>;
+pub type ActiveMetadata = HashMap<Box<str>, TapeMetadata>;
+
+#[derive(Clone, Copy, Default, BorshDeserialize, BorshSerialize)]
+pub struct TapeMetadata {
+    pub len: u64,
+    pub start: u64,
+}
 
 pub struct MetadataGuard {
     active_metadata: Arc<ActiveMetadata>,
     metadata: Arc<Metadata>,
     reader_slot: usize,
+    pub epoch: u64,
 }
 
 impl Deref for MetadataGuard {
@@ -113,6 +120,7 @@ impl Metadata {
             active_metadata: inner.active_metadata.clone(),
             metadata: Arc::clone(self),
             reader_slot,
+            epoch,
         }
     }
 
@@ -133,6 +141,16 @@ impl Metadata {
         inner.prev_op_was_pop = is_pop;
 
         Ok(())
+    }
+
+    pub fn oldest_reader_excluding_reader(&self, guard: &MetadataGuard) -> Option<u64> {
+        self.inner
+            .lock()
+            .reader_epochs
+            .iter()
+            .filter(|(r, _)| *r != guard.reader_slot)
+            .map(|(_, r)| *r)
+            .min()
     }
 }
 
@@ -213,6 +231,7 @@ impl MetadataBackingFiles {
 
 #[derive(BorshSerialize, BorshDeserialize)]
 struct StoredMetadata {
+    version: u32,
     hash: [u8; 32],
     epoch: u64,
     tapes: Vec<u8>,
@@ -221,6 +240,7 @@ struct StoredMetadata {
 impl Default for StoredMetadata {
     fn default() -> Self {
         StoredMetadata {
+            version: 1,
             hash: [0; 32],
             epoch: 0,
             tapes: borsh::to_vec(&HashMap::<Box<str>, u64>::new()).unwrap(),
@@ -244,6 +264,7 @@ fn serialise_metadata(epoch: u64, metadata: &ActiveMetadata) -> Vec<u8> {
     let hash = hasher.finalize().into();
 
     borsh::to_vec(&StoredMetadata {
+        version: 1,
         hash,
         epoch,
         tapes: tapes_bytes,

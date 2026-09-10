@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Boog900"]
 license = "MIT"
 repository = "https://github.com/Cuprate/tapes"
-description = "A minimal database for storing data in contigious tapes"
+description = "A minimal database for storing data in contiguous tapes"
 
 [dependencies]
 slab = { version = "0.4" }

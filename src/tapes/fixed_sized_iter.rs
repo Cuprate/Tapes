@@ -1,9 +1,10 @@
-use std::io;
+use std::{cmp::max, io};
 
-use crate::{FixedSizedTape, TapesRead};
+use crate::{BlobTape, FixedSizedTape, TapesRead};
 
-pub struct Iter<'a, E, T: ?Sized> {
-    tape: &'a FixedSizedTape<E>,
+/// An iterator over the entries of a fixed-sized tape.
+pub struct Iter<'a, B: BlobTape, E, T: ?Sized> {
+    tape: &'a FixedSizedTape<E, B>,
     tx: &'a T,
     start_index: u64,
 
@@ -13,16 +14,16 @@ pub struct Iter<'a, E, T: ?Sized> {
     tape_len: u64,
 }
 
-impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iter<'a, E, T> {
+impl<'a, B: BlobTape, E: bytemuck::Pod, T: TapesRead + ?Sized> Iter<'a, B, E, T> {
     pub(crate) fn new(
-        tape: &'a FixedSizedTape<E>,
+        tape: &'a FixedSizedTape<E, B>,
         tx: &'a T,
         start_index: u64,
         tape_len: u64,
     ) -> io::Result<Self> {
         const READ_AHEAD_SIZE: usize = 8 * 1024;
 
-        let mut buf = vec![E::zeroed(); READ_AHEAD_SIZE / size_of::<E>()];
+        let mut buf = vec![E::zeroed(); max(1, READ_AHEAD_SIZE / size_of::<E>())];
 
         let entries_to_read =
             buf.len() - (start_index as usize + buf.len()).saturating_sub(tape_len as usize);
@@ -42,7 +43,7 @@ impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iter<'a, E, T> {
     }
 }
 
-impl<'a, E: bytemuck::Pod, T: TapesRead + ?Sized> Iterator for Iter<'a, E, T> {
+impl<'a, B: BlobTape, E: bytemuck::Pod, T: TapesRead + ?Sized> Iterator for Iter<'a, B, E, T> {
     type Item = io::Result<E>;
 
     fn next(&mut self) -> Option<Self::Item> {

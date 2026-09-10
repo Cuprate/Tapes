@@ -1,29 +1,109 @@
-use std::fs::File;
 use std::io;
 
-use crate::{BlobTape, FixedSizedTape};
+use crate::{FixedSizedTape, Persistence, metadata::TapeMetadata};
 
+/// A trait for a tape of bytes.
+///
+/// You should not use any functions or types from this trait directly. You should use the transaction
+/// API.
+///
+/// This trait is sealed, only this crate provides implementations.
+pub trait BlobTape: Sized {
+    type OpenConfig: OpenConfig;
+
+    type Writer: BlobTapeWriter + 'static;
+
+    fn name(&self) -> &'static str;
+
+    fn open(
+        name: &'static str,
+        tape_metadata: Option<TapeMetadata>,
+        current_epoch: u64,
+        config: Self::OpenConfig,
+    ) -> io::Result<Self>;
+
+    fn read_bytes(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+
+    fn writer(&self, len: u64) -> io::Result<Self::Writer>;
+
+    fn delete(self) -> io::Result<()>;
+}
+
+/// A trait for the configuration of a tape.
+pub trait OpenConfig {
+    /// The byte index to start the tape at, only used when creating a new tape.
+    fn start_index(&self) -> u64;
+}
+
+/// An internal trait for a writer to a tape.
+///
+/// A single writer can only append _or_ truncate, you should not mix both in 1 writer instance.
+pub trait BlobTapeWriter {
+    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<u64>;
+
+    fn truncate(&mut self, new_len: u64);
+
+    fn flush(&mut self, persistence: Persistence) -> io::Result<()>;
+
+    fn revert(&mut self, _bytes: usize) {}
+
+    fn len(&self) -> u64;
+
+    fn remove_old_files(
+        &self,
+        metadata: TapeMetadata,
+        current_epoch: u64,
+        oldest_reader_epoch: u64,
+    ) -> io::Result<()>;
+}
+
+/// A trait for reading from tapes.
 pub trait TapesRead {
-    fn blob_tape_len(&self, tape: &BlobTape) -> Option<u64>;
+    /// Returns the length of a [`BlobTape`].
+    ///
+    /// This will not take into account the removed bytes and will be the total bytes written
+    /// excluding those popped.
+    fn blob_tape_len<B: BlobTape>(&self, tape: &B) -> Option<u64>;
 
-    fn read_bytes(&self, blob_tape: &BlobTape, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    /// Gets the start index of a tape.
+    ///
+    /// This will be `0` for a tape that has not had its start index shifted.
+    fn blob_tape_start<B: BlobTape>(&self, tape: &B) -> Option<u64>;
+
+    /// Fills a mutable buffer with bytes from a tape, starting at the given `offset`.
+    ///
+    /// Will return an error if the read goes past the end of the tape.
+    fn read_bytes<B: BlobTape>(
+        &self,
+        blob_tape: &B,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
         let tape_len = self
             .blob_tape_len(blob_tape)
             .ok_or(io::Error::other("Tape not found"))?;
 
-        read_bytes(blob_tape, tape_len, offset, buf)
+        let tape_start = self
+            .blob_tape_start(blob_tape)
+            .ok_or(io::Error::other("Tape not found"))?;
+
+        read_bytes(blob_tape, tape_len, tape_start, offset, buf)
     }
 
-    fn fixed_sized_tape_len<E: bytemuck::Pod>(&self, tape: &FixedSizedTape<E>) -> Option<u64> {
+    /// Gets the length of a fixed-sized tape in entries.
+    fn fixed_sized_tape_len<B: BlobTape, E: bytemuck::Pod>(
+        &self,
+        tape: &FixedSizedTape<E, B>,
+    ) -> Option<u64> {
         self.blob_tape_len(&tape.inner)
             .map(|bytes| bytes / size_of::<E>() as u64)
     }
     /// Reads an entry from a fixed-sized tape.
     ///
-    /// Returns `None` if read goes past the end of the tape.
-    fn read_entry<E: bytemuck::Pod>(
+    /// Returns `None` if the read goes past the end of the tape, or before the start of the tape.
+    fn read_entry<B: BlobTape, E: bytemuck::Pod>(
         &self,
-        fixed_sized_tape: &FixedSizedTape<E>,
+        fixed_sized_tape: &FixedSizedTape<E, B>,
         index: u64,
     ) -> io::Result<Option<E>> {
         let mut entry = E::zeroed();
@@ -49,9 +129,9 @@ pub trait TapesRead {
     /// when accessing the tape file.
     ///
     /// If there is an error, the state of the buffer is not guaranteed.
-    fn read_entries<E: bytemuck::Pod>(
+    fn read_entries<B: BlobTape, E: bytemuck::Pod>(
         &self,
-        fixed_sized_tape: &FixedSizedTape<E>,
+        fixed_sized_tape: &FixedSizedTape<E, B>,
         offset: u64,
         buf: &mut [E],
     ) -> io::Result<()> {
@@ -68,11 +148,11 @@ pub trait TapesRead {
     ///
     /// Will return an error if the start is past the end of the tape or on any other I/O error
     /// when accessing the tape file.
-    fn iter_from<'b, E: bytemuck::Pod>(
+    fn iter_from<'b, B: BlobTape, E: bytemuck::Pod>(
         &'b self,
-        fixed_sized_tape: &'b FixedSizedTape<E>,
+        fixed_sized_tape: &'b FixedSizedTape<E, B>,
         from: u64,
-    ) -> io::Result<crate::tapes::fixed_sized_iter::Iter<'b, E, Self>> {
+    ) -> io::Result<crate::tapes::fixed_sized_iter::Iter<'b, B, E, Self>> {
         let tape_len = self
             .fixed_sized_tape_len(fixed_sized_tape)
             .ok_or(io::Error::other("Tape not found"))?;
@@ -88,127 +168,119 @@ pub trait TapesRead {
     }
 }
 
+/// A trait for truncating and popping tapes.
 pub trait TapesTruncate: TapesRead {
-    fn truncate_blob_tape(&mut self, tape: &BlobTape, new_len: u64);
+    /// Truncates a blob tape to `new_len` bytes.
+    ///
+    /// Returns an error if the tape does not exist or if `new_len` is longer than the tape.
+    ///
+    /// If `new_len` is before the tape's start index, the tape is emptied and its start index
+    /// moves to `new_len`.
+    fn truncate_blob_tape<B: BlobTape>(&mut self, tape: &B, new_len: u64) -> io::Result<()>;
 
-    fn truncate_fixed_sized_tape<E: bytemuck::Pod>(
+    /// Truncates a fixed-sized tape to `new_len` entries.
+    ///
+    /// Returns an error if the tape does not exist or if `new_len` is longer than the tape.
+    ///
+    /// If `new_len` is before the tape's start index, the tape is emptied and its start index
+    /// moves to `new_len`.
+    fn truncate_fixed_sized_tape<B: BlobTape, E: bytemuck::Pod>(
         &mut self,
-        tape: &FixedSizedTape<E>,
+        tape: &FixedSizedTape<E, B>,
         new_len: u64,
-    ) {
-        self.truncate_blob_tape(&tape.inner, new_len * size_of::<E>() as u64);
+    ) -> io::Result<()> {
+        self.truncate_blob_tape(&tape.inner, new_len * size_of::<E>() as u64)
     }
 
-    fn drop_fixed_sized_tape<E: bytemuck::Pod>(
+    /// Drops the last `numb_to_drop` entries from a fixed-sized tape.
+    fn drop_fixed_sized_tape<B: BlobTape, E: bytemuck::Pod>(
         &mut self,
-        tape: &FixedSizedTape<E>,
+        tape: &FixedSizedTape<E, B>,
         numb_to_drop: u64,
-    ) {
+    ) -> io::Result<()> {
         let Some(len) = self.fixed_sized_tape_len(tape) else {
-            return;
+            return Err(io::Error::other("Tape not found"));
         };
         let new_len = len.saturating_sub(numb_to_drop);
 
-        self.truncate_fixed_sized_tape(tape, new_len);
+        self.truncate_fixed_sized_tape(tape, new_len)
     }
 
-    fn pop_fixed_sized_tape<E: bytemuck::Pod>(
+    /// Pops the last entry from a fixed-sized tape.
+    ///
+    /// Returns the index and entry of the popped entry, or `None` if the tape does not exist or is
+    /// empty.
+    fn pop_fixed_sized_tape<B: BlobTape, E: bytemuck::Pod>(
         &mut self,
-        tape: &FixedSizedTape<E>,
+        tape: &FixedSizedTape<E, B>,
     ) -> io::Result<Option<(u64, E)>> {
         let Some(len) = self.fixed_sized_tape_len(tape) else {
             return Ok(None);
         };
 
+        if len == 0 {
+            return Ok(None);
+        }
+
         let Some(entry) = self.read_entry(tape, len - 1)? else {
             return Ok(None);
         };
-        self.truncate_fixed_sized_tape(tape, len - 1);
+        self.truncate_fixed_sized_tape(tape, len - 1)?;
 
         Ok(Some((len - 1, entry)))
     }
 }
 
+/// A trait for appending to tapes.
 pub trait TapesAppend: TapesRead {
-    fn append_bytes(&mut self, tape: &BlobTape, buf: &[u8]) -> io::Result<u64>;
-    fn append_entries<E: bytemuck::NoUninit>(
+    /// Appends bytes to a tape.
+    ///
+    /// Returns the index at which the data was written.
+    fn append_bytes<B: BlobTape>(&mut self, tape: &B, buf: &[u8]) -> io::Result<u64>;
+    /// Appends entries to a fixed-sized tape.
+    ///
+    /// Returns the index of the first appended entry.
+    fn append_entries<B: BlobTape, E: bytemuck::NoUninit>(
         &mut self,
-        fixed_sized_tape: &FixedSizedTape<E>,
+        fixed_sized_tape: &FixedSizedTape<E, B>,
         entries: &[E],
     ) -> io::Result<u64> {
         self.append_bytes(&fixed_sized_tape.inner, bytemuck::cast_slice(entries))
             .map(|len| len / size_of::<E>() as u64)
     }
+
+    /// Shift the start index of a tape.
+    ///
+    /// This will do nothing if `new_start` is less than the current start of the tape, and for a whole
+    /// tape it will not free up disk space.
+    fn shift_start_idx<B: BlobTape>(&mut self, tape: &B, new_start: u64) -> io::Result<()>;
+
+    /// Shift the start index of a fixed size tape.
+    ///
+    /// This will do nothing if `new_start` is less than the current start of the tape, and for a whole
+    /// tape it will not free up disk space.
+    fn shift_start_idx_fixed<B: BlobTape, E: bytemuck::NoUninit>(
+        &mut self,
+        fixed_sized_tape: &FixedSizedTape<E, B>,
+        new_start: u64,
+    ) -> io::Result<()> {
+        self.shift_start_idx(&fixed_sized_tape.inner, new_start * size_of::<E>() as u64)
+    }
 }
 
-fn read_bytes(blob_tape: &BlobTape, tape_len: u64, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    if tape_len < offset + buf.len() as u64 {
+fn read_bytes<B: BlobTape>(
+    blob_tape: &B,
+    tape_len: u64,
+    start_index: u64,
+    offset: u64,
+    buf: &mut [u8],
+) -> io::Result<()> {
+    if tape_len < offset + buf.len() as u64 || start_index > offset {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
-            "Read past end of tape",
+            "Read out of bounds",
         ));
     }
 
-    let top_cache = blob_tape.top_cache.read();
-    let cached_offset = top_cache.cache_start_idx() as u64;
-
-    let mut last_byte_needed_offset = offset + buf.len() as u64;
-
-    if last_byte_needed_offset > cached_offset {
-        let read_start = offset.saturating_sub(cached_offset);
-        let buf_to_fill = &mut buf[(cached_offset.saturating_sub(offset)) as usize..];
-
-        top_cache.fill(read_start as usize, buf_to_fill);
-        last_byte_needed_offset -= buf_to_fill.len() as u64;
-    }
-
-    if last_byte_needed_offset != offset {
-        read_exact_at(
-            &blob_tape.file,
-            &mut buf[0..(last_byte_needed_offset - offset) as usize],
-            offset,
-        )?;
-    }
-
-    Ok(())
-}
-
-pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-
-        file.read_exact_at(buf, offset)
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-
-        let mut buf = buf;
-        let mut offset = offset;
-        while !buf.is_empty() {
-            match file.seek_read(buf, offset) {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    buf = &mut buf[n..];
-                    offset += n as u64;
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-
-        if !buf.is_empty() {
-            Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "failed to fill the whole buffer",
-            ))
-        } else {
-            Ok(())
-        }
-    }
+    blob_tape.read_bytes(offset, buf)
 }
