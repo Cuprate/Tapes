@@ -59,9 +59,13 @@ impl<B: BlobTape + 'static> BlobTape for CachedBlobTape<B> {
         current_epoch: u64,
         config: Self::OpenConfig,
     ) -> io::Result<Self> {
+        let start_index = config.inner.start_index();
         let tape = B::open(name, tape_metadata, current_epoch, config.inner)?;
 
-        let metadata = tape_metadata.unwrap_or_default();
+        let metadata = tape_metadata.unwrap_or(TapeMetadata {
+            start: start_index,
+            len: start_index,
+        });
         let start = max(
             metadata.len.saturating_sub(config.top_cache_size),
             metadata.start,
@@ -90,6 +94,8 @@ impl<B: BlobTape + 'static> BlobTape for CachedBlobTape<B> {
             top_cache.fill(read_start as usize, buf_to_fill);
             last_byte_needed_offset -= buf_to_fill.len() as u64;
         }
+
+        drop(top_cache);
 
         if last_byte_needed_offset != offset {
             self.tape.read_bytes(

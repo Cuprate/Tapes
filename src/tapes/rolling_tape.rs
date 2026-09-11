@@ -71,6 +71,10 @@ impl BlobTape for RollingBlobTape {
             return Err(io::Error::other("file_size must not be 0."));
         }
 
+        if name == "metadata" {
+            return Err(io::Error::other("The tape name `metadata` is reserved."));
+        }
+
         let path = config.dir.join("tapes").join(name);
 
         if tape_metadata.is_none() {
@@ -95,6 +99,12 @@ impl BlobTape for RollingBlobTape {
                     else {
                         return Err(io::Error::other("File in rolling tapes has invalid name"));
                     };
+
+                    if tape_metadata
+                        .is_some_and(|m| index > offset_to_file_index(m.len, config.file_size))
+                    {
+                        continue;
+                    }
 
                     let rolling_tape_file = RollingTapeFile::open(&path, index)?;
 
@@ -151,32 +161,18 @@ impl BlobTape for RollingBlobTape {
     }
 
     fn read_bytes(&self, mut offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
-        let files = self.files.read();
+        while !buf.is_empty() {
+            let file_index = offset_to_file_index(offset, self.file_size);
 
-        let files = files
-            .iter()
-            .filter(|f| {
-                let file_start = file_index_to_offset(f.file_index, self.file_size);
-                let file_end = file_start + self.file_size;
+            let file = file_at(&self.files.read(), file_index)
+                .ok_or_else(|| io::Error::other("Tape file not found"))?;
 
-                file_start < offset + buf.len() as u64 && file_end > offset
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for file in files {
-            let next_file_start =
-                file_index_to_offset(file.file_index, self.file_size) + self.file_size;
-
-            let bytes_left_on_file = next_file_start - offset;
+            let offset_in_file = offset - file_index_to_offset(file_index, self.file_size);
+            let bytes_left_on_file = self.file_size - offset_in_file;
 
             let bytes_to_read = min(buf.len(), bytes_left_on_file.try_into().unwrap());
 
-            read_exact_at_file(
-                &file.file,
-                &mut buf[..bytes_to_read],
-                offset - file_index_to_offset(file.file_index, self.file_size),
-            )?;
+            read_exact_at_file(&file, &mut buf[..bytes_to_read], offset_in_file)?;
 
             offset += u64::try_from(bytes_to_read).unwrap();
             buf = &mut buf[bytes_to_read..];
@@ -186,30 +182,24 @@ impl BlobTape for RollingBlobTape {
     }
 
     fn writer(&self, len: u64) -> io::Result<Self::Writer> {
-        let files = self.files.read();
+        let current_file_idx = offset_to_file_index(len, self.file_size);
 
-        let currently_writing_idx = match files
-            .iter()
-            .enumerate()
-            .find(|(_, tape)| file_index_to_offset(tape.file_index, self.file_size) > len)
-            .map(|(i, _)| i)
-            .unwrap_or(files.len())
-            .checked_sub(1)
-        {
-            Some(i) => i,
-            None => {
-                unreachable!("Tape files must contain at least one tape file.");
-            }
+        let first_file_touched = {
+            let files = self.files.read();
+            let slot = current_file_idx
+                .checked_add(1)
+                .map_or(files.len(), |next| slot_for(&files, next));
+            slot.checked_sub(1)
+                .map_or(current_file_idx, |slot| files[slot].file_index)
         };
-
-        drop(files);
 
         Ok(RollingBlobTapeWriter {
             files: self.files.clone(),
             dir: self.dir.clone(),
             file_size: self.file_size,
-            currently_writing_idx,
-            first_file_touched: currently_writing_idx,
+            current_file_idx,
+            first_file_touched,
+            current_file: None,
             len,
             is_truncation: None,
         })
@@ -236,7 +226,7 @@ impl RollingTapeFile {
                 .write(true)
                 .read(true)
                 .create(true)
-                .truncate(true)
+                .truncate(false)
                 .open(&file_path)?,
         );
 
@@ -266,23 +256,25 @@ pub struct RollingBlobTapeWriter {
     files: Arc<RwLock<VecDeque<RollingTapeFile>>>,
     dir: PathBuf,
     file_size: u64,
-    currently_writing_idx: usize,
-    first_file_touched: usize,
+    current_file_idx: u64,
+    first_file_touched: u64,
+    current_file: Option<Arc<File>>,
     len: u64,
     is_truncation: Option<bool>,
 }
 
 impl RollingBlobTapeWriter {
-    fn make_new_file(&self) -> io::Result<RollingTapeFile> {
-        let next_index = self
-            .files
-            .read()
-            .back()
-            .map_or_default(|f| f.file_index + 1);
+    fn make_new_file(&self, file_index: u64) -> io::Result<RollingTapeFile> {
+        let file = RollingTapeFile::new(&self.dir, file_index)?;
 
-        let file = RollingTapeFile::new(&self.dir, next_index)?;
-
-        self.files.write().push_back(file.clone());
+        let mut files = self.files.write();
+        let slot = slot_for(&files, file_index);
+        debug_assert!(
+            files.get(slot).is_none_or(|f| f.file_index != file_index),
+            "rolling tape file {file_index} already exists"
+        );
+        files.truncate(slot);
+        files.push_back(file.clone());
 
         Ok(file)
     }
@@ -296,36 +288,30 @@ impl BlobTapeWriter for RollingBlobTapeWriter {
         let idx = self.len;
 
         while !buf.is_empty() {
-            let files = self.files.read();
-            let tape_file = match files.get(self.currently_writing_idx) {
-                Some(tape_file) => {
-                    let tape_file = tape_file.clone();
-                    drop(files);
-                    tape_file
-                }
-                None => {
-                    drop(files);
-                    self.make_new_file()?
-                }
-            };
+            let file_index = offset_to_file_index(self.len, self.file_size);
 
-            let bytes_left_on_first_tape = self.file_size
-                - (self.len - file_index_to_offset(tape_file.file_index, self.file_size));
+            if self.current_file.is_none() || file_index != self.current_file_idx {
+                let file = file_at(&self.files.read(), file_index);
+                self.current_file = Some(match file {
+                    Some(file) => file,
+                    None => self.make_new_file(file_index)?.file,
+                });
+                self.current_file_idx = file_index;
+            }
+
+            let offset_in_file = self.len - file_index_to_offset(file_index, self.file_size);
+            let bytes_left_on_first_tape = self.file_size - offset_in_file;
 
             let bytes_to_write = min(buf.len(), bytes_left_on_first_tape.try_into().unwrap());
 
             write_all_at(
-                &tape_file.file,
+                self.current_file.as_ref().unwrap(),
                 &buf[..bytes_to_write],
-                self.len - file_index_to_offset(tape_file.file_index, self.file_size),
+                offset_in_file,
             )?;
 
             self.len += u64::try_from(bytes_to_write).unwrap();
             buf = &buf[bytes_to_write..];
-
-            if !buf.is_empty() {
-                self.currently_writing_idx += 1;
-            }
         }
 
         Ok(idx)
@@ -334,25 +320,13 @@ impl BlobTapeWriter for RollingBlobTapeWriter {
     fn flush(&mut self, persistence: Persistence) -> io::Result<()> {
         if self.is_truncation.is_some_and(|x| x) {
             let mut files = self.files.write();
+            let first = slot_for(&files, offset_to_file_index(self.len, self.file_size));
 
-            let mut file_index = files.front().map(|f| f.file_index).unwrap_or_default();
-
-            let mut start_index = file_index_to_offset(file_index, self.file_size);
-
-            while start_index > self.len {
-                files.push_front(RollingTapeFile::new(&self.dir, file_index - 1)?);
-
-                file_index -= 1;
-                start_index -= self.file_size;
-            }
-
-            for file in files.iter_mut() {
-                if file_index_to_offset(file.file_index, self.file_size) <= self.len
-                    && self.len
-                        < file_index_to_offset(file.file_index, self.file_size) + self.file_size
-                {
-                    file.out_of_range_at_epoch = None;
-                }
+            for file in files
+                .range_mut(first..)
+                .take_while(|file| file.out_of_range_at_epoch.is_some())
+            {
+                file.out_of_range_at_epoch = None;
             }
 
             return Ok(());
@@ -362,8 +336,10 @@ impl BlobTapeWriter for RollingBlobTapeWriter {
             return Ok(());
         }
 
-        for i in self.first_file_touched..(self.currently_writing_idx + 1) {
-            let file = self.files.read().get(i).unwrap().file.clone();
+        for file_index in self.first_file_touched..=self.current_file_idx {
+            let Some(file) = file_at(&self.files.read(), file_index) else {
+                continue;
+            };
 
             match persistence {
                 Persistence::Buffer => (),
@@ -413,17 +389,14 @@ fn remove_old_files(
 ) -> io::Result<()> {
     let mut files = files.write();
 
-    let mut i = 1;
-    while let Some(file_2) = files.get(i) {
-        if file_index_to_offset(file_2.file_index, file_size) <= metadata.start {
-            files
-                .get_mut(i - 1)
-                .unwrap()
-                .out_of_range_at_epoch
-                .get_or_insert(current_epoch);
-        }
+    let end = slot_for(&files, offset_to_file_index(metadata.start, file_size));
 
-        i += 1;
+    for file in files
+        .range_mut(..end)
+        .rev()
+        .take_while(|file| file.out_of_range_at_epoch.is_none())
+    {
+        file.out_of_range_at_epoch = Some(current_epoch);
     }
 
     while let Some(file) = files.pop_front_if(|file| {
@@ -435,6 +408,35 @@ fn remove_old_files(
     }
 
     Ok(())
+}
+
+fn slot_for(files: &VecDeque<RollingTapeFile>, file_index: u64) -> usize {
+    let (Some(first), Some(last)) = (files.front(), files.back()) else {
+        return 0;
+    };
+
+    if file_index <= first.file_index {
+        return 0;
+    }
+
+    if file_index > last.file_index {
+        return files.len();
+    }
+
+    if let Ok(slot) = usize::try_from(file_index - first.file_index)
+        && files.get(slot).is_some_and(|f| f.file_index == file_index)
+    {
+        return slot;
+    }
+
+    files.partition_point(|f| f.file_index < file_index)
+}
+
+fn file_at(files: &VecDeque<RollingTapeFile>, file_index: u64) -> Option<Arc<File>> {
+    files
+        .get(slot_for(files, file_index))
+        .filter(|file| file.file_index == file_index)
+        .map(|file| Arc::clone(&file.file))
 }
 
 fn offset_to_file_index(offset: u64, file_size: u64) -> u64 {
