@@ -273,6 +273,7 @@ impl RollingBlobTapeWriter {
             files.get(slot).is_none_or(|f| f.file_index != file_index),
             "rolling tape file {file_index} already exists"
         );
+        // We can clean up files here that have fallen off from the top due to a truncation here.
         files.truncate(slot);
         files.push_back(file.clone());
 
