@@ -118,19 +118,7 @@ impl BlobTape for RollingBlobTape {
                     ));
                 }
 
-                std::fs::create_dir_all(path.clone())?;
-
-                let first_file = RollingTapeFile::new(
-                    &path,
-                    offset_to_file_index(config.start_index, config.file_size),
-                )?;
-
-                return Ok(Self {
-                    name,
-                    files: Arc::new(RwLock::new(VecDeque::from([first_file]))),
-                    dir: path,
-                    file_size: config.file_size,
-                });
+                std::fs::create_dir_all(&path)?;
             }
             Err(e) => return Err(e),
         }
@@ -183,14 +171,19 @@ impl BlobTape for RollingBlobTape {
 
     fn writer(&self, len: u64) -> io::Result<Self::Writer> {
         let current_file_idx = offset_to_file_index(len, self.file_size);
-
         let first_file_touched = {
             let files = self.files.read();
-            let slot = current_file_idx
-                .checked_add(1)
-                .map_or(files.len(), |next| slot_for(&files, next));
-            slot.checked_sub(1)
-                .map_or(current_file_idx, |slot| files[slot].file_index)
+            let slot = slot_for(&files, current_file_idx);
+            let current_exists = files
+                .get(slot)
+                .is_some_and(|f| f.file_index == current_file_idx);
+
+            if !current_exists && let Some(prev) = slot.checked_sub(1) {
+                // The previous file could have unsynced writes.
+                files[prev].file_index
+            } else {
+                current_file_idx
+            }
         };
 
         Ok(RollingBlobTapeWriter {
