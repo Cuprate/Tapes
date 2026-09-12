@@ -97,17 +97,24 @@ impl TapesAppendTransaction {
         name: &'static str,
         options: B::OpenConfig,
     ) -> io::Result<FixedSizedTape<E, B>> {
-        let inner = self.open_blob_tape(name, options)?;
+        let metadata = self.metadata_guard.get(name).copied();
+        let start = metadata.map_or(options.start_index(), |metadata| metadata.start);
+        let len = metadata.map_or(start, |metadata| metadata.len);
 
-        if self
-            .metadata_guard
-            .get(name)
-            .is_some_and(|metadata| !(metadata.len as usize).is_multiple_of(size_of::<E>()))
-        {
+        let entry_size = size_of::<E>() as u64;
+        if !start.is_multiple_of(entry_size) {
+            return Err(io::Error::other(
+                "Tape start is not a multiple of entry size",
+            ));
+        }
+
+        if !len.is_multiple_of(entry_size) {
             return Err(io::Error::other(
                 "Tape size is not a multiple of entry size",
             ));
         }
+
+        let inner = self.open_blob_tape(name, options)?;
 
         Ok(FixedSizedTape {
             inner,
