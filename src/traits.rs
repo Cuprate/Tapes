@@ -11,7 +11,7 @@ use crate::{FixedSizedTape, Persistence, metadata::TapeMetadata};
 pub trait BlobTape: Sized {
     type OpenConfig: OpenConfig;
 
-    type Writer: BlobTapeWriter + 'static;
+    type Writer: BlobTapeWriter + Send + 'static;
 
     fn name(&self) -> &'static str;
 
