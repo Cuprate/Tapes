@@ -80,8 +80,11 @@ impl Tapes {
 pub struct TapesAppendTransaction {
     metadata: Arc<Metadata>,
     metadata_guard: MetadataGuard,
-    modified_tapes: HashMap<&'static str, (Box<dyn BlobTapeWriter>, u64)>,
-    deleted_tapes: Vec<(&'static str, Box<dyn FnOnce() -> io::Result<()>>)>,
+    modified_tapes: HashMap<&'static str, (Box<dyn BlobTapeWriter + Send + 'static>, u64)>,
+    deleted_tapes: Vec<(
+        &'static str,
+        Box<dyn FnOnce() -> io::Result<()> + Send + 'static>,
+    )>,
     committed: bool,
 }
 
@@ -149,7 +152,7 @@ impl TapesAppendTransaction {
     /// error.
     ///
     /// No other transactions should be active during a write transaction that deletes a tape.
-    pub fn delete_tape<B: BlobTape + 'static>(&mut self, tape: B) {
+    pub fn delete_tape<B: BlobTape + Send + 'static>(&mut self, tape: B) {
         self.deleted_tapes
             .push((tape.name(), Box::new(move || tape.delete())));
     }
